@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "blindspot"
+version = "0.1.0"
+description = "A simulated robot arm that follows natural-language pick-and-place instructions."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = "MIT"
+dependencies = ["mujoco>=3.3,<4", "scipy>=1.15,<2"]
+
+[dependency-groups]
+dev = ["pytest>=8.3,<9", "ruff>=0.11,<1"]
+
+[tool.ruff]
+target-version = "py312"
+extend-exclude = ["third_party"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["common", "envs", "motion", "skills", "data", "policies", "agent", "eval"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = ["rendering: requires an available MuJoCo rendering backend"]
