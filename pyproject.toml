@@ -9,7 +9,7 @@ description = "A simulated robot arm that follows natural-language pick-and-plac
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 license = "MIT"
-dependencies = ["mujoco>=3.3,<4", "scipy>=1.15,<2"]
+dependencies = ["mink==1.3.0", "mujoco>=3.3,<4", "scipy>=1.15,<2"]
 
 [dependency-groups]
 dev = ["pytest>=8.3,<9", "ruff>=0.11,<1"]
