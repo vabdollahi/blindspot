@@ -1,4 +1,4 @@
-.PHONY: setup test lint view-scene benchmark-scene
+.PHONY: setup test lint view-scene view-control benchmark-scene
 
 ifeq ($(shell uname -s),Darwin)
 VIEWER_PYTHON := uv run mjpython
@@ -18,6 +18,9 @@ lint:
 
 view-scene:
 	$(VIEWER_PYTHON) scripts/view_scene.py
+
+view-control:
+	$(VIEWER_PYTHON) scripts/view_control.py $(VIEW_CONTROL_ARGS)
 
 benchmark-scene:
 	uv run --locked python scripts/benchmark_scene.py

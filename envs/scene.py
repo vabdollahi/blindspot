@@ -4,6 +4,7 @@ import math
 from pathlib import Path
 
 import mujoco
+import numpy as np
 
 _MENAGERIE_SCENE = (
     Path(__file__).resolve().parents[1]
@@ -18,6 +19,7 @@ _CUBE_COLORS = {
     "blue": (0.10, 0.28, 0.82, 1.0),
     "green": (0.12, 0.68, 0.24, 1.0),
 }
+_ARM_POSITION_SERVO_GAIN_SCALE = 5.0
 
 
 def build_scene_spec() -> mujoco.MjSpec:
@@ -143,4 +145,11 @@ def build_scene_spec() -> mujoco.MjSpec:
 
 def build_scene() -> mujoco.MjModel:
     """Compile and return the pick-and-place MuJoCo model."""
-    return build_scene_spec().compile()
+    model = build_scene_spec().compile()
+    arm_actuator_ids = np.asarray(
+        [model.actuator(f"actuator{index}").id for index in range(1, 8)],
+        dtype=np.intp,
+    )
+    model.actuator_gainprm[arm_actuator_ids, 0] *= _ARM_POSITION_SERVO_GAIN_SCALE
+    model.actuator_biasprm[arm_actuator_ids, 1] *= _ARM_POSITION_SERVO_GAIN_SCALE
+    return model
