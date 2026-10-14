@@ -22,3 +22,15 @@ The initial decisions below are fixed in [the roadmap](roadmap.md#3-fixed-design
 | Camera axes | Convert MuJoCo OpenGL camera axes to OpenCV axes for pinhole projection | Keeps camera projection formulas consistent with their expected axes. |
 | Seed ranges | Train 0-99,999; validation 100,000-109,999; evaluation 1,000,000-1,009,999 | Keeps evaluation seeds separate from training and tuning. |
 | Randomness | Spawn named independent generators from one `SeedSequence` | Makes random streams reproducible and separates purposes such as scene, noise, and policy. |
+
+## Throughput baseline
+
+Measured on 2026-10-14 with `make benchmark-scene`: macOS 26.6.2, Apple M3 Max, 36 GB memory, Python 3.12.4, and MuJoCo 3.16.0. The benchmark timed 10,000 physics steps after 1,000 warm-up steps and 500 `Renderer` update/render frames per camera after 20 warm-up frames, at 128 × 128.
+
+| Measurement | Throughput |
+| --- | ---: |
+| Physics | 33,916.4 steps/s |
+| Front camera | 119.5 frames/s |
+| Wrist camera | 108.7 frames/s |
+
+These local throughput figures are a reference, not a performance gate; they vary with hardware, graphics drivers, and system load. Re-run `make benchmark-scene` to update them.
