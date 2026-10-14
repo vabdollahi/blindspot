@@ -20,6 +20,8 @@ _CUBE_COLORS = {
     "green": (0.12, 0.68, 0.24, 1.0),
 }
 _ARM_POSITION_SERVO_GAIN_SCALE = 5.0
+_CUBE_MASS = 0.05
+_CONTACT_FRICTION = (2.0, 0.005, 0.0001)
 
 
 def build_scene_spec() -> mujoco.MjSpec:
@@ -44,6 +46,7 @@ def build_scene_spec() -> mujoco.MjSpec:
         for index, geom in enumerate(pads, start=1):
             geom.name = f"{side}_fingertip_pad_{index}"
             geom.condim = 4
+            geom.friction = _CONTACT_FRICTION
 
     worldbody = spec.worldbody
     floor = spec.geom("floor")
@@ -70,10 +73,10 @@ def build_scene_spec() -> mujoco.MjSpec:
             name=f"cube_{color}_geom",
             type=mujoco.mjtGeom.mjGEOM_BOX,
             size=[0.02, 0.02, 0.02],
-            mass=0.075,
+            mass=_CUBE_MASS,
             material=f"cube_{color}_material",
             condim=4,
-            friction=[1.0, 0.005, 0.0001],
+            friction=_CONTACT_FRICTION,
         )
 
     bowl = worldbody.add_body(name="bowl", pos=[0.66, 0.20, 0.0])

@@ -14,7 +14,7 @@ IK_STEPS_PER_ENVIRONMENT_STEP = 5
 PHYSICS_STEPS_PER_IK_STEP = 5
 TCP_SPEED_LIMIT = 0.25
 YAW_RATE_LIMIT = 1.0
-WORKSPACE_LOWER = np.array([0.25, -0.30, 0.05], dtype=np.float64)
+WORKSPACE_LOWER = np.array([0.25, -0.30, 0.02], dtype=np.float64)
 WORKSPACE_UPPER = np.array([0.70, 0.30, 0.45], dtype=np.float64)
 
 _ARM_ACTUATOR_NAMES = tuple(f"actuator{index}" for index in range(1, 8))
