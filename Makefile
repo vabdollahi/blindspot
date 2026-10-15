@@ -1,4 +1,4 @@
-.PHONY: setup test lint view-scene view-control view-expert evaluate report benchmark-scene
+.PHONY: setup test lint view-scene view-control view-expert evaluate baseline report benchmark-scene
 
 ifeq ($(shell uname -s),Darwin)
 VIEWER_PYTHON := uv run mjpython
@@ -27,6 +27,9 @@ view-expert:
 
 evaluate:
 	uv run --locked python scripts/evaluate.py $(EVALUATE_ARGS)
+
+baseline:
+	uv run --locked python scripts/evaluate_baseline.py $(BASELINE_ARGS)
 
 report:
 	uv run --locked python -m eval.report $(REPORT_ARGS)

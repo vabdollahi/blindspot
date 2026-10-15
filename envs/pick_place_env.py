@@ -165,6 +165,9 @@ class PickPlaceEnv(gym.Env[dict[str, Any], np.ndarray]):
         self.obs_mode = obs_mode
         self.render_mode = render_mode
         self._task_config = _TASK_CONFIGS[self.task]
+        self._episode_time_limit_steps = round(
+            self._task_config.time_limit / ENVIRONMENT_TIMESTEP
+        )
         self._level_config = _LEVEL_CONFIGS[self.level]
         self.model = build_scene(
             include_distractors=self.level == "L2",
@@ -393,7 +396,10 @@ class PickPlaceEnv(gym.Env[dict[str, Any], np.ndarray]):
                     self._episode_done = True
 
         terminated = self._episode_done
-        truncated = not terminated and self.data.time >= self._task_config.time_limit
+        truncated = (
+            not terminated
+            and self._episode_steps >= self._episode_time_limit_steps
+        )
         if truncated and self._failure_reason is None:
             self._failure_reason = "timeout"
         success = terminated

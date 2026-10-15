@@ -28,7 +28,7 @@ def test_wilson_interval_handles_all_successes_and_failures() -> None:
     no_success = wilson_interval(0, 10)
 
     assert 0.0 < all_success[0] < 1.0
-    assert all_success[1] == pytest.approx(1.0)
+    assert all_success[1] == 1.0
     assert no_success[0] == 0.0
     assert 0.0 < no_success[1] < 1.0
 

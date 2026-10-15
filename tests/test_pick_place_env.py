@@ -231,6 +231,33 @@ def test_success_requires_one_second_of_continuous_goal_state() -> None:
     environment.close()
 
 
+def test_t4_time_limit_truncates_after_exactly_four_hundred_policy_steps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Apply the 20-second time limit by 20 Hz steps, not floating-point time."""
+    environment = PickPlaceEnv("T4", "L0", "state")
+    environment.reset(seed=42)
+
+    def advance_one_policy_step(_: np.ndarray) -> None:
+        mujoco.mj_step(environment.model, environment.data, nstep=25)
+
+    monkeypatch.setattr(environment.control, "apply", advance_one_policy_step)
+    action = np.array([0.5, 0.0, 0.3, 0.0, 1.0], dtype=np.float32)
+
+    for _ in range(399):
+        _, _, terminated, truncated, _ = environment.step(action)
+        assert not terminated
+        assert not truncated
+
+    _, _, terminated, truncated, info = environment.step(action)
+
+    assert not terminated
+    assert truncated
+    assert environment._episode_steps == 400
+    assert info["episode_time"] <= environment._task_config.time_limit + 1e-9
+    environment.close()
+
+
 @pytest.mark.rendering
 @pytest.mark.parametrize("level", ["L0", "L2"])
 def test_image_observation_contains_both_128px_cameras(level: str) -> None:

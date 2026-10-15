@@ -42,7 +42,9 @@ def wilson_interval(
         )
         / denominator
     )
-    return (float(max(0.0, center - margin)), float(min(1.0, center + margin)))
+    lower = 0.0 if successes == 0 else max(0.0, center - margin)
+    upper = 1.0 if successes == trials else min(1.0, center + margin)
+    return (float(lower), float(upper))
 
 
 def percentile_bootstrap(
