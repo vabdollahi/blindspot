@@ -11,6 +11,7 @@ requires-python = ">=3.12,<3.13"
 license = "MIT"
 dependencies = [
     "gymnasium>=1.2,<2",
+    "matplotlib>=3.9,<4",
     "mink==1.3.0",
     "mujoco>=3.3,<4",
     "pydantic>=2.11,<3",
@@ -24,6 +25,10 @@ dev = ["pytest>=8.3,<9", "ruff>=0.11,<1"]
 [tool.ruff]
 target-version = "py312"
 extend-exclude = ["third_party"]
+
+[tool.ruff.lint.per-file-ignores]
+# The evaluator intentionally serializes ordinary exceptions into episode records.
+"eval/runner.py" = ["BLE001"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["common", "envs", "motion", "skills", "data", "policies", "agent", "eval"]
