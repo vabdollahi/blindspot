@@ -1,0 +1,27 @@
+tasks:
+  T1:
+    time_limit: 5.0
+    default_target: [0.50, 0.00, 0.35]
+  T2:
+    time_limit: 15.0
+    default_target: [0.49, 0.02, 0.02]
+  T3:
+    time_limit: 15.0
+  T3-L:
+    time_limit: 15.0
+    cube_count: [2, 3]
+    instruction_templates:
+      - "Put the {color} cube in the bowl."
+      - "Place the {color} cube inside the bowl."
+      - "Move the {color} cube into the bowl."
+  T4:
+    time_limit: 20.0
+  T5:
+    time_limit: 60.0
+    instruction_templates:
+      - "Put the red cube in the target zone, then put the blue cube in the bowl."
+    goal_sequence:
+      - task: T2
+        object: cube_red
+      - task: T3
+        object: cube_blue

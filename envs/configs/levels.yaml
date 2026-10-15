@@ -1,0 +1,61 @@
+levels:
+  L0:
+    cube_x: [0.34, 0.64]
+    cube_y: [-0.20, -0.20]
+    target_x: [0.49, 0.49]
+    target_y: [0.02, 0.02]
+    target_z: [0.35, 0.35]
+    bowl_x: [0.66, 0.66]
+    bowl_y: [0.20, 0.20]
+    red_x: [0.34, 0.34]
+    red_y: [-0.20, -0.20]
+    blue_x: [0.49, 0.49]
+    blue_y: [-0.20, -0.20]
+    yaw: [-1.57079632679, 1.57079632679]
+    mass_scale: [1.0, 1.0]
+    friction_scale: [1.0, 1.0]
+    camera_position_jitter: 0.0
+    camera_rotation_jitter_degrees: 0.0
+    light_color_jitter: 0.0
+    material_color_jitter: 0.0
+    distractor_count: [0, 0]
+  L1:
+    cube_x: [0.32, 0.56]
+    cube_y: [-0.27, -0.05]
+    target_x: [0.40, 0.58]
+    target_y: [-0.03, 0.12]
+    target_z: [0.25, 0.40]
+    bowl_x: [0.59, 0.70]
+    bowl_y: [0.12, 0.27]
+    red_x: [0.30, 0.42]
+    red_y: [-0.27, -0.05]
+    blue_x: [0.49, 0.60]
+    blue_y: [-0.27, -0.05]
+    yaw: [-1.57079632679, 1.57079632679]
+    mass_scale: [1.0, 1.0]
+    friction_scale: [1.0, 1.0]
+    camera_position_jitter: 0.0
+    camera_rotation_jitter_degrees: 0.0
+    light_color_jitter: 0.0
+    material_color_jitter: 0.0
+    distractor_count: [0, 0]
+  L2:
+    cube_x: [0.32, 0.56]
+    cube_y: [-0.27, -0.05]
+    target_x: [0.40, 0.58]
+    target_y: [-0.03, 0.12]
+    target_z: [0.25, 0.40]
+    bowl_x: [0.59, 0.70]
+    bowl_y: [0.12, 0.27]
+    red_x: [0.30, 0.42]
+    red_y: [-0.27, -0.05]
+    blue_x: [0.49, 0.60]
+    blue_y: [-0.27, -0.05]
+    yaw: [-1.57079632679, 1.57079632679]
+    mass_scale: [0.8, 1.2]
+    friction_scale: [0.8, 1.2]
+    camera_position_jitter: 0.01
+    camera_rotation_jitter_degrees: 2.0
+    light_color_jitter: 0.15
+    material_color_jitter: 0.20
+    distractor_count: [1, 3]

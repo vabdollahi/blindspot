@@ -24,7 +24,11 @@ _CUBE_MASS = 0.05
 _CONTACT_FRICTION = (2.0, 0.005, 0.0001)
 
 
-def build_scene_spec() -> mujoco.MjSpec:
+def build_scene_spec(
+    *,
+    include_distractors: bool = False,
+    include_visual_textures: bool = False,
+) -> mujoco.MjSpec:
     """Build the pick-and-place scene specification from Menagerie."""
     spec = mujoco.MjSpec.from_file(str(_MENAGERIE_SCENE))
     for keyframe in tuple(spec.keys):
@@ -42,7 +46,9 @@ def build_scene_spec() -> mujoco.MjSpec:
             if geom.type == mujoco.mjtGeom.mjGEOM_BOX
         ]
         if len(pads) != 5:
-            raise RuntimeError(f"Expected five fingertip pads on {side}, found {len(pads)}.")
+            raise RuntimeError(
+                f"Expected five fingertip pads on {side}, found {len(pads)}."
+            )
         for index, geom in enumerate(pads, start=1):
             geom.name = f"{side}_fingertip_pad_{index}"
             geom.condim = 4
@@ -52,16 +58,49 @@ def build_scene_spec() -> mujoco.MjSpec:
     floor = spec.geom("floor")
     floor.contype = 0
     floor.conaffinity = 0
-    worldbody.add_geom(
+    table_geom = worldbody.add_geom(
         name="table",
         type=mujoco.mjtGeom.mjGEOM_BOX,
         pos=[0.3, 0.0, -0.025],
         size=[0.6, 0.55, 0.025],
         rgba=[0.48, 0.52, 0.54, 1.0],
     )
+    if include_visual_textures:
+        spec.add_texture(
+            name="table_texture",
+            type=mujoco.mjtTexture.mjTEXTURE_2D,
+            width=4,
+            height=4,
+            nchannel=3,
+            data=_checker_texture_data((0.48, 0.52, 0.54)),
+        )
+        spec.add_material(
+            name="table_material",
+            rgba=[0.48, 0.52, 0.54, 1.0],
+            textures=["table_texture"],
+            texrepeat=[4.0, 4.0],
+        )
+        table_geom.material = "table_material"
 
     for color, rgba in _CUBE_COLORS.items():
-        spec.add_material(name=f"cube_{color}_material", rgba=rgba)
+        if include_visual_textures:
+            texture_name = f"cube_{color}_texture"
+            spec.add_texture(
+                name=texture_name,
+                type=mujoco.mjtTexture.mjTEXTURE_2D,
+                width=4,
+                height=4,
+                nchannel=3,
+                data=_checker_texture_data(rgba[:3]),
+            )
+            spec.add_material(
+                name=f"cube_{color}_material",
+                rgba=rgba,
+                textures=[texture_name],
+                texrepeat=[2.0, 2.0],
+            )
+        else:
+            spec.add_material(name=f"cube_{color}_material", rgba=rgba)
     for color, position in (
         ("red", [0.34, -0.20, 0.02]),
         ("blue", [0.49, -0.20, 0.02]),
@@ -79,9 +118,41 @@ def build_scene_spec() -> mujoco.MjSpec:
             friction=_CONTACT_FRICTION,
         )
 
+    if include_distractors:
+        for index in range(3):
+            distractor = worldbody.add_body(
+                name=f"distractor_{index}",
+                pos=[1.1 + 0.05 * index, 0.45, 0.02],
+            )
+            distractor.add_freejoint(name=f"distractor_{index}_free")
+            distractor.add_geom(
+                name=f"distractor_{index}_geom",
+                type=mujoco.mjtGeom.mjGEOM_BOX,
+                size=[0.02, 0.02, 0.02],
+                mass=_CUBE_MASS,
+                rgba=[0.35, 0.38, 0.40, 1.0],
+                condim=4,
+                friction=_CONTACT_FRICTION,
+            )
+
+    if include_visual_textures:
+        spec.add_texture(
+            name="bowl_texture",
+            type=mujoco.mjtTexture.mjTEXTURE_2D,
+            width=4,
+            height=4,
+            nchannel=3,
+            data=_checker_texture_data((0.22, 0.25, 0.28)),
+        )
+        spec.add_material(
+            name="bowl_material",
+            rgba=[0.22, 0.25, 0.28, 1.0],
+            textures=["bowl_texture"],
+            texrepeat=[2.0, 2.0],
+        )
     bowl = worldbody.add_body(name="bowl", pos=[0.66, 0.20, 0.0])
     bowl.add_freejoint(name="bowl_free")
-    bowl.add_geom(
+    bowl_base = bowl.add_geom(
         name="bowl_base",
         type=mujoco.mjtGeom.mjGEOM_CYLINDER,
         pos=[0.0, 0.0, 0.003],
@@ -91,6 +162,8 @@ def build_scene_spec() -> mujoco.MjSpec:
         condim=4,
         friction=[1.0, 0.005, 0.0001],
     )
+    if include_visual_textures:
+        bowl_base.material = "bowl_material"
     wall_count = 16
     inner_radius = 0.07
     wall_thickness = 0.006
@@ -98,7 +171,7 @@ def build_scene_spec() -> mujoco.MjSpec:
     wall_tangent_half_width = wall_center_radius * math.tan(math.pi / wall_count)
     for index in range(wall_count):
         angle = 2.0 * math.pi * index / wall_count
-        bowl.add_geom(
+        bowl_wall = bowl.add_geom(
             name=f"bowl_wall_{index:02d}",
             type=mujoco.mjtGeom.mjGEOM_BOX,
             pos=[
@@ -113,6 +186,8 @@ def build_scene_spec() -> mujoco.MjSpec:
             condim=4,
             friction=[1.0, 0.005, 0.0001],
         )
+        if include_visual_textures:
+            bowl_wall.material = "bowl_material"
 
     spec.add_material(name="target_zone_material", rgba=[0.94, 0.72, 0.12, 0.45])
     worldbody.add_geom(
@@ -146,9 +221,16 @@ def build_scene_spec() -> mujoco.MjSpec:
     return spec
 
 
-def build_scene() -> mujoco.MjModel:
+def build_scene(
+    *,
+    include_distractors: bool = False,
+    include_visual_textures: bool = False,
+) -> mujoco.MjModel:
     """Compile and return the pick-and-place MuJoCo model."""
-    model = build_scene_spec().compile()
+    model = build_scene_spec(
+        include_distractors=include_distractors,
+        include_visual_textures=include_visual_textures,
+    ).compile()
     arm_actuator_ids = np.asarray(
         [model.actuator(f"actuator{index}").id for index in range(1, 8)],
         dtype=np.intp,
@@ -156,3 +238,13 @@ def build_scene() -> mujoco.MjModel:
     model.actuator_gainprm[arm_actuator_ids, 0] *= _ARM_POSITION_SERVO_GAIN_SCALE
     model.actuator_biasprm[arm_actuator_ids, 1] *= _ARM_POSITION_SERVO_GAIN_SCALE
     return model
+
+
+def _checker_texture_data(rgb: tuple[float, float, float]) -> list[int]:
+    """Build a small two-tone checker texture from a normalized RGB color."""
+    pixels: list[int] = []
+    for row in range(4):
+        for column in range(4):
+            scale = 0.68 if (row + column) % 2 else 1.0
+            pixels.extend(round(channel * scale * 255) for channel in rgb)
+    return pixels
