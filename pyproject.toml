@@ -19,6 +19,9 @@ dependencies = [
     "scipy>=1.15,<2",
 ]
 
+[project.optional-dependencies]
+imitation = ["lerobot[dataset]==0.6.1"]
+
 [dependency-groups]
 dev = ["pytest>=8.3,<9", "ruff>=0.11,<1"]
 

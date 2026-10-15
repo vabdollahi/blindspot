@@ -44,6 +44,16 @@ make report
 
 By default, the report is written to `eval/results/report.md` and `eval/results/success-rates.png`. Use `REPORT_ARGS="--results-dir PATH --output-dir PATH"` to read results from or write reports to other directories. Both `evaluate` and `baseline` accept `--results-dir PATH` through their corresponding `*_ARGS` variable.
 
+## Demonstrations
+
+Install the optional pinned LeRobot dataset dependency and generate 400 successful T2-L1 and T3-L1 demonstrations (380 training episodes and 20 validation episodes per task):
+
+```sh
+make demos
+```
+
+Use `DEMO_ARGS="--task T2 --episodes 10 --workers 2"` for a smaller collection. Outputs are LeRobot datasets under `data/datasets/<task>-l1/{train,validation}/`; the collection manifest records episode seeds, discard rates, target-object counts, and the noise event rate. Existing default datasets are preserved; reruns automatically use names such as `t2-l1-run-02`. An explicit `--dataset-name` that already exists remains an error. Each policy step has a 1% chance of receiving a Gaussian perturbation (1 cm xyz, 3 degrees yaw); the clean expert action remains the label. This sparse schedule preserves successful collection while exposing recovery examples. To run the open-loop replay check, set both noise standard deviations to zero and pass `--verify-open-loop`.
+
 ## Third-party licenses
 
 | Component | License information |

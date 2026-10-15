@@ -106,6 +106,33 @@ def test_l2_has_seeded_visual_physical_randomization_and_distractors() -> None:
     second.close()
 
 
+def test_renderer_is_reused_for_l1_but_recreated_for_l2() -> None:
+    """Reuse worker renderers unless L2 texture randomization requires refresh."""
+
+    class RendererStub:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    l1 = PickPlaceEnv("T2", "L1", "state")
+    l1_renderer = RendererStub()
+    l1._renderer = l1_renderer
+    l1.reset(seed=10)
+    assert l1._renderer is l1_renderer
+    assert not l1_renderer.closed
+    l1.close()
+
+    l2 = PickPlaceEnv("T2", "L2", "state")
+    l2_renderer = RendererStub()
+    l2._renderer = l2_renderer
+    l2.reset(seed=10)
+    assert l2._renderer is None
+    assert l2_renderer.closed
+    l2.close()
+
+
 @pytest.mark.parametrize(
     ("task", "instruction"),
     [

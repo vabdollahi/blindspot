@@ -22,6 +22,7 @@ _CUBE_COLORS = {
 _ARM_POSITION_SERVO_GAIN_SCALE = 5.0
 _CUBE_MASS = 0.05
 _CONTACT_FRICTION = (2.0, 0.005, 0.0001)
+_VISUAL_FLOOR_CLEARANCE = 0.001
 
 
 def build_scene_spec(
@@ -56,6 +57,7 @@ def build_scene_spec(
 
     worldbody = spec.worldbody
     floor = spec.geom("floor")
+    floor.pos = [0.0, 0.0, -_VISUAL_FLOOR_CLEARANCE]
     floor.contype = 0
     floor.conaffinity = 0
     table_geom = worldbody.add_geom(

@@ -1,4 +1,4 @@
-.PHONY: setup test lint view-scene view-control view-expert evaluate baseline report benchmark-scene
+.PHONY: setup test lint view-scene view-control view-expert evaluate baseline report benchmark-scene demos
 
 ifeq ($(shell uname -s),Darwin)
 VIEWER_PYTHON := uv run mjpython
@@ -36,3 +36,6 @@ report:
 
 benchmark-scene:
 	uv run --locked python scripts/benchmark_scene.py
+
+demos:
+	uv run --locked --extra imitation python -m data.generate $(DEMO_ARGS)

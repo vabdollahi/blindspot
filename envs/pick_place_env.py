@@ -327,7 +327,8 @@ class PickPlaceEnv(gym.Env[dict[str, Any], np.ndarray]):
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Reset the task from named reproducible random streams."""
         super().reset(seed=seed)
-        self.close()
+        if self.level == "L2":
+            self.close()
         actual_seed = (
             int(seed)
             if seed is not None
@@ -417,6 +418,13 @@ class PickPlaceEnv(gym.Env[dict[str, Any], np.ndarray]):
         if self.render_mode is None:
             return None
         return self._render_camera("front")
+
+    def observe_images(self) -> dict[str, np.ndarray]:
+        """Render the synchronized front and wrist RGB observations."""
+        return {
+            "observation.images.front": self._render_camera("front"),
+            "observation.images.wrist": self._render_camera("wrist"),
+        }
 
     def close(self) -> None:
         """Release the lazy MuJoCo renderer, if one was created."""
@@ -850,8 +858,7 @@ class PickPlaceEnv(gym.Env[dict[str, Any], np.ndarray]):
             observation["target_pose"] = self._current_target_pose().astype(np.float32)
             observation["target_object"] = self._current_target_object()
         else:
-            observation["observation.images.front"] = self._render_camera("front")
-            observation["observation.images.wrist"] = self._render_camera("wrist")
+            observation.update(self.observe_images())
         return observation
 
     def _render_camera(self, camera_name: str) -> np.ndarray:

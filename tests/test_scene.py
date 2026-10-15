@@ -23,6 +23,7 @@ def test_scene_compiles_and_tcp_is_between_fingertips() -> None:
     floor_id = model.geom("floor").id
     assert model.geom_contype[floor_id] == 0
     assert model.geom_conaffinity[floor_id] == 0
+    assert model.geom_pos[floor_id, 2] < table_z + table_half_size[2]
 
     data = mujoco.MjData(model)
     mujoco.mj_forward(model, data)
