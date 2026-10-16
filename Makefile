@@ -1,9 +1,11 @@
-.PHONY: setup test lint view-scene view-control view-expert evaluate baseline report benchmark-scene demos
+.PHONY: setup test lint view-scene view-control view-expert view-bc evaluate baseline evaluate-bc report benchmark-scene demos train-bc
 
 ifeq ($(shell uname -s),Darwin)
 VIEWER_PYTHON := uv run mjpython
+BC_VIEWER_PYTHON := mjpython
 else
 VIEWER_PYTHON := uv run python
+BC_VIEWER_PYTHON := python
 endif
 
 setup:
@@ -25,8 +27,14 @@ view-control:
 view-expert:
 	$(VIEWER_PYTHON) scripts/view_expert.py $(VIEW_EXPERT_ARGS)
 
+view-bc:
+	uv run --locked --extra imitation $(BC_VIEWER_PYTHON) scripts/view_bc.py $(BC_VIEW_ARGS)
+
 evaluate:
 	uv run --locked python scripts/evaluate.py $(EVALUATE_ARGS)
+
+evaluate-bc:
+	uv run --locked --extra imitation python scripts/evaluate_bc.py $(BC_EVAL_ARGS)
 
 baseline:
 	uv run --locked python scripts/evaluate_baseline.py $(BASELINE_ARGS)
@@ -39,3 +47,6 @@ benchmark-scene:
 
 demos:
 	uv run --locked --extra imitation python -m data.generate $(DEMO_ARGS)
+
+train-bc:
+	uv run --locked --extra imitation python scripts/train_bc.py $(BC_ARGS)

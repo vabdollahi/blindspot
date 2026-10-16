@@ -20,7 +20,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-imitation = ["lerobot[dataset]==0.6.1"]
+imitation = [
+    "lerobot[dataset]==0.6.1",
+    "torch>=2.10,<2.12",
+    "torchvision>=0.25,<0.27",
+]
 
 [dependency-groups]
 dev = ["pytest>=8.3,<9", "ruff>=0.11,<1"]

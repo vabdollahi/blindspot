@@ -54,6 +54,31 @@ make demos
 
 Use `DEMO_ARGS="--task T2 --episodes 10 --workers 2"` for a smaller collection. Outputs are LeRobot datasets under `data/datasets/<task>-l1/{train,validation}/`; the collection manifest records episode seeds, discard rates, target-object counts, and the noise event rate. Existing default datasets are preserved; reruns automatically use names such as `t2-l1-run-02`. An explicit `--dataset-name` that already exists remains an error. Each policy step has a 1% chance of receiving a Gaussian perturbation (1 cm xyz, 3 degrees yaw); the clean expert action remains the label. This sparse schedule preserves successful collection while exposing recovery examples. To run the open-loop replay check, set both noise standard deviations to zero and pass `--verify-open-loop`.
 
+Train a behavior-cloning baseline from a generated dataset (MPS is selected automatically when available):
+
+```sh
+make train-bc BC_ARGS="--dataset-name t2-l1-run-02 --policy state"
+make train-bc BC_ARGS="--dataset-name t2-l1-run-02 --policy image"
+```
+
+Checkpoints and `run.json` records are written under `checkpoints/bc/<dataset>/<policy>/`. Default reruns use numbered directories such as `state-run-02`, preserving earlier checkpoints. An explicit `--output-dir` that already exists remains an error. State BC uses the 12-D proprioception, 28-D oracle object poses, and 4-D target pose. Image BC uses both 128 px cameras with ImageNet-pretrained ResNet-18 encoders and the 12-D proprioception.
+
+The run record includes held-out action MAE by component and frame L1 grouped by demonstration episode. Add `--rollout-validation` to also run the checkpoint in MuJoCo on the collection's held-out validation seeds; the run record stores its success summary and the evaluator writes the per-episode outcomes under the checkpoint directory.
+
+Evaluate a checkpoint on the fixed evaluation seed range and inspect its Wilson 95% interval:
+
+```sh
+make evaluate-bc BC_EVAL_ARGS="--checkpoint checkpoints/bc/t2-l1/state/checkpoint.pt --task T2 --level L1 --episodes 100 --workers 1"
+```
+
+Watch one evaluation-seed episode in the passive MuJoCo viewer (`mjpython` is selected automatically on macOS):
+
+```sh
+make view-bc BC_VIEW_ARGS="--checkpoint checkpoints/bc/t2-l1/state/checkpoint.pt --task T2 --level L1 --seed 1000002"
+```
+
+Close the viewer after the episode result is printed. Use `--device cpu` to reduce accelerator memory use, or `--show-tcp` to display the TCP marker. `view_expert.py` remains the scripted-expert viewer; `view-bc` loads the learned checkpoint.
+
 ## Third-party licenses
 
 | Component | License information |
