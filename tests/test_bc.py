@@ -159,6 +159,21 @@ def test_image_model_accepts_channel_last_uint8_frames() -> None:
     assert torch.isfinite(output).all()
 
 
+def test_image_bc_freezes_resnets_but_trains_fusion_head() -> None:
+    """Keep frozen camera encoders in eval mode while training the action head."""
+    model = bc.ImageBC(pretrained=False).train()
+
+    assert not model.front_encoder.training
+    assert not model.wrist_encoder.training
+    assert all(
+        not parameter.requires_grad for parameter in model.front_encoder.parameters()
+    )
+    assert all(
+        not parameter.requires_grad for parameter in model.wrist_encoder.parameters()
+    )
+    assert all(parameter.requires_grad for parameter in model.head.parameters())
+
+
 def test_image_policy_adapts_environment_images_and_state() -> None:
     """Accept uint8 HWC camera observations through the shared Policy interface."""
     policy = bc.ImageBCPolicy(bc.ImageBC(pretrained=False), device="cpu")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Mapping
 from pathlib import Path
@@ -14,6 +15,7 @@ from torch import Tensor, nn
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader, Dataset
 from torchvision.models import ResNet18_Weights, resnet18
+from tqdm.auto import tqdm
 
 from eval.policy import Policy
 from motion.control import WORKSPACE_LOWER, WORKSPACE_UPPER
@@ -32,6 +34,7 @@ _ACTION_LOW = np.array([*WORKSPACE_LOWER, -np.pi / 2, 0.0], dtype=np.float32)
 _ACTION_HIGH = np.array([*WORKSPACE_UPPER, np.pi / 2, 1.0], dtype=np.float32)
 _IMAGE_MEAN = (0.485, 0.456, 0.406)
 _IMAGE_STD = (0.229, 0.224, 0.225)
+_LOGGER = logging.getLogger(__name__)
 
 
 class BCTrainingConfig(BaseModel):
@@ -97,19 +100,23 @@ class LeRobotBCDataset(Dataset[dict[str, Tensor]]):
 
     def __getitem__(self, index: int) -> dict[str, Tensor]:
         """Return one BC transition, decoding camera frames only for image BC."""
+        sample = self._numeric_sample(index)
+        if self.policy_type == "image":
+            frame = self._dataset[index]
+            sample["front"] = _image_tensor(frame[IMAGE_FEATURES[0]])
+            sample["wrist"] = _image_tensor(frame[IMAGE_FEATURES[1]])
+        return sample
+
+    def _numeric_sample(self, index: int) -> dict[str, Tensor]:
+        """Return the numeric columns without decoding any camera video."""
         row = self._numeric[index]
-        sample = {
+        return {
             "state": _as_float_tensor(row["observation.state"]),
             "object_poses": _as_float_tensor(row["observation.object_poses"]),
             "target_pose": _as_float_tensor(row["observation.target_pose"]),
             "action": _as_float_tensor(row["action"]),
             "episode_index": torch.tensor(row["episode_index"], dtype=torch.int64),
         }
-        if self.policy_type == "image":
-            frame = self._dataset[index]
-            sample["front"] = _image_tensor(frame[IMAGE_FEATURES[0]])
-            sample["wrist"] = _image_tensor(frame[IMAGE_FEATURES[1]])
-        return sample
 
     def normalization_features(self) -> Tensor:
         """Return training-only numeric inputs without decoding video frames."""
@@ -173,10 +180,10 @@ class StateBC(nn.Module):
 
 
 class ImageBC(nn.Module):
-    """Two-view ImageNet ResNet-18 policy fused with proprioception."""
+    """Two-view frozen ImageNet ResNet-18 features fused with proprioception."""
 
     def __init__(self, *, pretrained: bool = True) -> None:
-        """Build pretrained camera encoders and a proprioceptive action head."""
+        """Build frozen pretrained camera encoders and a trainable action head."""
         super().__init__()
         weights = ResNet18_Weights.DEFAULT if pretrained else None
         self.front_encoder = _resnet_encoder(weights)
@@ -200,6 +207,17 @@ class ImageBC(nn.Module):
             nn.GELU(),
             nn.Linear(256, 5),
         )
+        self.front_encoder.requires_grad_(False)
+        self.wrist_encoder.requires_grad_(False)
+        self.front_encoder.eval()
+        self.wrist_encoder.eval()
+
+    def train(self, mode: bool = True) -> ImageBC:
+        """Train the action head while keeping frozen ResNet encoders in eval mode."""
+        super().train(mode)
+        self.front_encoder.eval()
+        self.wrist_encoder.eval()
+        return self
 
     def set_input_statistics(self, mean: Tensor, std: Tensor) -> None:
         """Set train-split normalization statistics for proprioception."""
@@ -210,13 +228,64 @@ class ImageBC(nn.Module):
 
     def forward(self, front: Tensor, wrist: Tensor, state: Tensor) -> Tensor:
         """Predict the next absolute action from both camera views and state."""
+        visual_features = self.encode_visual(front, wrist)
+        return self.forward_visual_features(visual_features, state)
+
+    def encode_visual(self, front: Tensor, wrist: Tensor) -> Tensor:
+        """Extract frozen front and wrist ResNet features from normalized RGB inputs."""
         front_image = _normalize_image_batch(front, self.image_mean, self.image_std)
         wrist_image = _normalize_image_batch(wrist, self.image_mean, self.image_std)
+        with torch.no_grad():
+            return torch.cat(
+                (self.front_encoder(front_image), self.wrist_encoder(wrist_image)),
+                dim=-1,
+            )
+
+    def forward_visual_features(self, visual_features: Tensor, state: Tensor) -> Tensor:
+        """Predict an action from cached image embeddings and proprioception."""
         normalized_state = (state - self.state_mean) / self.state_std
-        visual_features = torch.cat(
-            (self.front_encoder(front_image), self.wrist_encoder(wrist_image)), dim=-1
-        )
         return self.head(torch.cat((visual_features, normalized_state), dim=-1))
+
+
+class CachedImageBCDataset(Dataset[dict[str, Tensor]]):
+    """Store one frozen visual embedding per image-BC transition."""
+
+    def __init__(
+        self,
+        dataset: Dataset[dict[str, Tensor]],
+        visual_features: Tensor,
+    ) -> None:
+        """Pair cached embeddings with numeric values from the source split."""
+        if visual_features.shape != (len(dataset), 1024):
+            raise ValueError("Cached ResNet features must have shape [N, 1024]")
+        self._dataset = dataset
+        self._visual_features = visual_features.to(device="cpu", dtype=torch.float32)
+
+    def __len__(self) -> int:
+        """Return the number of cached image transitions."""
+        return len(self._dataset)
+
+    def __getitem__(self, index: int) -> dict[str, Tensor]:
+        """Return cached visual features and numeric policy inputs without decoding."""
+        numeric_sample = getattr(self._dataset, "_numeric_sample", None)
+        if callable(numeric_sample):
+            sample = numeric_sample(index)
+        else:
+            sample = {
+                key: value
+                for key, value in self._dataset[index].items()
+                if key
+                in {"state", "object_poses", "target_pose", "action", "episode_index"}
+            }
+        sample["visual_features"] = self._visual_features[index]
+        return sample
+
+    def normalization_features(self) -> Tensor:
+        """Reuse the source split's numeric features for state normalization."""
+        feature_method = getattr(self._dataset, "normalization_features", None)
+        if not callable(feature_method):
+            raise TypeError("Source dataset must provide normalization_features()")
+        return feature_method()
 
 
 class StateBCPolicy:
@@ -305,10 +374,15 @@ def train_behavior_cloning(
     model: StateBC | ImageBC = (
         StateBC() if policy_type == "state" else ImageBC(pretrained=config.pretrained)
     )
-    _set_model_normalization(model, policy_type, train_dataset)
     model.to(device)
+    if policy_type == "image" and isinstance(model, ImageBC):
+        train_dataset = _cache_visual_features(train_dataset, model, config, device)
+        validation_dataset = _cache_visual_features(
+            validation_dataset, model, config, device
+        )
+    _set_model_normalization(model, policy_type, train_dataset)
     optimizer = torch.optim.AdamW(
-        model.parameters(),
+        (parameter for parameter in model.parameters() if parameter.requires_grad),
         lr=config.learning_rate,
         weight_decay=config.weight_decay,
     )
@@ -326,7 +400,12 @@ def train_behavior_cloning(
     epochs_without_improvement = 0
     history: list[BCEpochMetrics] = []
 
-    for epoch in range(1, config.epochs + 1):
+    epoch_progress = tqdm(
+        range(1, config.epochs + 1),
+        desc=f"{policy_type} BC",
+        unit="epoch",
+    )
+    for epoch in epoch_progress:
         model.train()
         training_l1 = _train_epoch(
             model, policy_type, train_loader, optimizer, device, config.max_grad_norm
@@ -338,6 +417,10 @@ def train_behavior_cloning(
                 training_l1=training_l1,
                 validation_l1=validation_l1,
             )
+        )
+        epoch_progress.set_postfix(
+            train_l1=f"{training_l1:.4f}",
+            val_l1=f"{validation_l1:.4f}",
         )
         if validation_l1 < best_validation_l1:
             best_validation_l1 = validation_l1
@@ -565,14 +648,47 @@ def _predict_batch(
             batch["target_pose"].to(device),
         )
     elif policy_type == "image" and isinstance(model, ImageBC):
-        prediction = model(
-            batch["front"].to(device),
-            batch["wrist"].to(device),
-            state,
-        )
+        if "visual_features" in batch:
+            prediction = model.forward_visual_features(
+                batch["visual_features"].to(device),
+                state,
+            )
+        else:
+            prediction = model(
+                batch["front"].to(device),
+                batch["wrist"].to(device),
+                state,
+            )
     else:
         raise TypeError("Policy type and model class do not match")
     return prediction, action
+
+
+def _cache_visual_features(
+    dataset: Dataset[dict[str, Tensor]],
+    model: ImageBC,
+    config: BCTrainingConfig,
+    device: torch.device,
+) -> CachedImageBCDataset:
+    """Decode each image once and cache frozen ResNet embeddings for training."""
+    loader = _data_loader(dataset, config, shuffle=False, generator=None)
+    feature_batches: list[Tensor] = []
+    model.eval()
+    with torch.no_grad():
+        for batch in tqdm(
+            loader,
+            desc="Cache ResNet features",
+            unit="batch",
+            leave=False,
+        ):
+            visual_features = model.encode_visual(
+                batch["front"].to(device),
+                batch["wrist"].to(device),
+            )
+            feature_batches.append(visual_features.detach().to("cpu", torch.float32))
+    if not feature_batches:
+        raise ValueError("Cannot cache image features from an empty dataset")
+    return CachedImageBCDataset(dataset, torch.cat(feature_batches, dim=0))
 
 
 def _train_epoch(
@@ -587,7 +703,8 @@ def _train_epoch(
     model.train()
     total_loss = 0.0
     total_samples = 0
-    for batch in loader:
+    progress = tqdm(loader, desc="Train batches", unit="batch", leave=False)
+    for batch in progress:
         prediction, action = _predict_batch(model, policy_type, batch, device)
         loss = nn.functional.l1_loss(prediction, action)
         optimizer.zero_grad(set_to_none=True)
@@ -597,6 +714,7 @@ def _train_epoch(
         batch_size = action.shape[0]
         total_loss += float(loss.detach()) * batch_size
         total_samples += batch_size
+        progress.set_postfix(l1=f"{float(loss.detach()):.4f}")
     if total_samples == 0:
         raise ValueError("Training dataloader produced no samples")
     return total_loss / total_samples

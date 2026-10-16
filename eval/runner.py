@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 import numpy as np
+from tqdm.auto import tqdm
 
 from common.seeding import named_generators
 from envs.pick_place_env import PickPlaceEnv
@@ -68,7 +69,14 @@ def evaluate(
         initializer=_initialize_worker,
         initargs=(policy_payload, normalized_task, level, normalized_obs_mode),
     ) as executor:
-        episodes = list(executor.map(_run_episode, episode_seeds))
+        episodes = list(
+            tqdm(
+                executor.map(_run_episode, episode_seeds),
+                total=len(episode_seeds),
+                desc=f"Evaluating {method_name} {normalized_task}-{level}",
+                unit="episode",
+            )
+        )
 
     success_count = sum(episode.success for episode in episodes)
     failures: dict[str, int] = {}

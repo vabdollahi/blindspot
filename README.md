@@ -61,7 +61,7 @@ make train-bc BC_ARGS="--dataset-name t2-l1-run-02 --policy state"
 make train-bc BC_ARGS="--dataset-name t2-l1-run-02 --policy image"
 ```
 
-Checkpoints and `run.json` records are written under `checkpoints/bc/<dataset>/<policy>/`. Default reruns use numbered directories such as `state-run-02`, preserving earlier checkpoints. An explicit `--output-dir` that already exists remains an error. State BC uses the 12-D proprioception, 28-D oracle object poses, and 4-D target pose. Image BC uses both 128 px cameras with ImageNet-pretrained ResNet-18 encoders and the 12-D proprioception.
+Checkpoints and `run.json` records are written under `checkpoints/bc/<dataset>/<policy>/`. Default reruns use numbered directories such as `state-run-02`, preserving earlier checkpoints. An explicit `--output-dir` that already exists remains an error. State BC uses the 12-D proprioception, 28-D oracle object poses, and 4-D target pose. Image BC uses both 128 px cameras with ImageNet-pretrained, frozen ResNet-18 encoders and the 12-D proprioception. The camera embeddings are cached once per train/validation split; only the small fusion/action head is optimized. `train-bc` displays cache, batch, and epoch progress bars in interactive terminals.
 
 The run record includes held-out action MAE by component and frame L1 grouped by demonstration episode. Add `--rollout-validation` to also run the checkpoint in MuJoCo on the collection's held-out validation seeds; the run record stores its success summary and the evaluator writes the per-episode outcomes under the checkpoint directory.
 
@@ -70,6 +70,8 @@ Evaluate a checkpoint on the fixed evaluation seed range and inspect its Wilson 
 ```sh
 make evaluate-bc BC_EVAL_ARGS="--checkpoint checkpoints/bc/t2-l1/state/checkpoint.pt --task T2 --level L1 --episodes 100 --workers 1"
 ```
+
+Evaluation shows a per-episode progress bar. BC evaluation defaults to MPS, then CUDA, then CPU when available; accelerator and image evaluations use one worker by default to avoid duplicating large models. Image BC still takes more compute per step because it renders both cameras and runs both ResNet encoders. Override with `--device` or `--workers` when needed.
 
 Watch one evaluation-seed episode in the passive MuJoCo viewer (`mjpython` is selected automatically on macOS):
 

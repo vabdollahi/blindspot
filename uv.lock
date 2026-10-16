@@ -134,6 +134,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "pyyaml" },
     { name = "scipy" },
+    { name = "tqdm" },
 ]
 
 [package.optional-dependencies]
@@ -161,6 +162,7 @@ requires-dist = [
     { name = "scipy", specifier = ">=1.15,<2" },
     { name = "torch", marker = "extra == 'imitation'", specifier = ">=2.10,<2.12" },
     { name = "torchvision", marker = "extra == 'imitation'", specifier = ">=0.25,<0.27" },
+    { name = "tqdm", specifier = ">=4.67,<5" },
 ]
 provides-extras = ["imitation"]
 

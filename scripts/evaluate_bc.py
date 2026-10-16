@@ -21,8 +21,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--results-dir", type=Path)
     parser.add_argument(
         "--device",
-        default="cpu",
-        help="Inference device; CPU keeps policies portable to spawned workers.",
+        default="auto",
+        help="Inference device; auto prefers MPS, then CUDA, then CPU.",
     )
     return parser.parse_args()
 
@@ -40,13 +40,22 @@ def main() -> None:
     policy = load_bc_policy(arguments.checkpoint, device=arguments.device)
     obs_mode = "image" if isinstance(policy, ImageBCPolicy) else "state"
     method = "image-bc" if obs_mode == "image" else "state-bc"
+    workers = arguments.workers
+    if workers is None and (
+        obs_mode == "image" or policy.device.type in {"mps", "cuda"}
+    ):
+        workers = 1
+    print(
+        f"Inference device: {policy.device}; workers: "
+        f"{workers if workers is not None else 'auto'}"
+    )
     result = evaluate(
         policy,
         arguments.task,
         arguments.level,
         list(range(arguments.seed_start, arguments.seed_start + arguments.episodes)),
         obs_mode=obs_mode,
-        workers=arguments.workers,
+        workers=workers,
         method=method,
         results_dir=arguments.results_dir,
     )
