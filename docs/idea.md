@@ -17,9 +17,10 @@ A simulated robot arm that follows natural-language commands, built from the bot
 | Area | Where |
 | --- | --- |
 | Simulation environment | Phases 0-1: MuJoCo scene, Gymnasium environment, and a scripted expert built on off-the-shelf IK |
-| Imitation learning | Phase 2: BC, ACT, and Diffusion Policy with LeRobot |
-| Vision-language-action models | Phase 2: SmolVLA fine-tuned on the project's demos, compared with ACT and with the modular agent; Phase 4: SmolVLA as the agent's skill executor |
-| Reinforcement learning | Phase 3: PPO and residual RL on a task with perturbed dynamics |
+| Reinforcement learning (expert) | Phase 1b: PPO trained from scratch into a stronger expert and demonstrator, replacing the scripted expert as the data source for imitation learning |
+| Imitation learning | Phase 2: BC, ACT, and Diffusion Policy with LeRobot, trained on the Phase 1b RL expert's demonstrations |
+| Vision-language-action models | Phase 2: SmolVLA fine-tuned on the Phase 1b RL expert's demos, compared with ACT and with the modular agent; Phase 4: SmolVLA as the agent's skill executor |
+| Reinforcement learning (refinement) | Phase 3: residual RL refining the Phase 1b RL expert under perturbed dynamics |
 | Language and vision agents | Phase 4: VLM grounding, LLM planner, verifier with recovery |
 | Reproducible evaluation | A cross-layer benchmark with confidence intervals, one-command regeneration, and a test suite |
 | Commodity hardware | Simulation only, CPU physics, small image policies on MPS, quantized local models via MLX, API models for the upper-bound rows |
@@ -94,7 +95,7 @@ Four layers. Each one runs on its own and is evaluated on its own. The architect
 
 1. **Physics and robot.** A MuJoCo scene, built with `MjSpec`, containing the Panda, a table, colored cubes, a bowl, a front camera, and a wrist camera.
 2. **Motion and skills.** Off-the-shelf IK (`mink`) and MuJoCo's position servos, wrapped as parameterized skills and a scripted expert.
-3. **Learned policies.** Imitation learning (BC, ACT, Diffusion Policy), a fine-tuned VLA (SmolVLA), and RL (PPO, residual PPO), trained from scripted-expert data and simulator rewards.
+3. **Learned policies.** RL (PPO) trained from scratch into an expert, imitation learning (BC, ACT, Diffusion Policy) and a fine-tuned VLA (SmolVLA) trained on that RL expert's demonstrations, and residual PPO refining the RL expert under perturbed dynamics.
 4. **Agent layer.** A VLM grounds objects in the camera image, an LLM planner emits a JSON plan of skill calls, and a verifier checks each result and triggers retry or replanning. The agent's action API is the **skill library**, executed either by scripted skills or by the fine-tuned VLA (Phase 4).
 
 ---
@@ -184,7 +185,7 @@ T2 with a **tight placement tolerance** (1 cm and 10° yaw), **unmodeled dynamic
 
 ## 8. Phase plan
 
-The project is built in six phases. Each phase ends with exit criteria that must hold before the next one starts.
+The project is built in seven phases. Each phase ends with exit criteria that must hold before the next one starts.
 
 ### Phase 0: Setup and scene
 
@@ -213,13 +214,26 @@ The project is built in six phases. Each phase ends with exit criteria that must
 
 **Exit criteria.** T1 ≥ 99%. T2 and T3 ≥ 90% at L1. T4 ≥ 70% at L1. IK solves random workspace targets, the arm settles within 2 mm of a held target, and the same seed reproduces the same episode. A script writes the results to `eval/results/`.
 
+In practice, the scripted expert's measured success fell short of T3 and T4's exit criteria. Rather than keep hand-tuning the state machine, Phase 1b trains an RL policy on the same tasks to replace it as the demonstrator; the scripted expert remains in the benchmark as a baseline.
+
+### Phase 1b: Reinforcement learning (training an RL expert)
+
+**Build.**
+
+- **Pure PPO, not residual RL,** trained from scratch per task, covering every non-language task (T1, T2, T3, T4), so the result does not inherit the scripted expert's failure modes. T3-L and T5 need language conditioning and stay out of scope; they keep using the scripted expert (§8, Phase 2, "Language-labeled demos"). Reuse Phase 3's state-based environment design (below) without the T2-H perturbations: proprioception, the target object's own pose (not hard-coded by color, so one policy per task generalizes to naming an arbitrary object among distractors), the destination pose, and relative vectors, with a staged dense reward (reach, grasp, lift, place) plus a sparse success bonus. T1 has no object: its observation and reward collapse to TCP-to-target distance only.
+- Train with `SubprocVecEnv`, 8-10 workers, the same PPO hyperparameters as Phase 3's pure-RL arm. Budget up to 10-20 M environment steps per task, capped at 2 days wall-clock.
+
+**Evaluate.** Run the Phase 1 evaluation harness on each trained policy, on the same evaluation seeds as the scripted expert's Phase 1 baseline.
+
+**Exit criteria.** Every non-language task (T1, T2, T3, T4) has a frozen RL-expert checkpoint that meets the Phase 1 exit criteria for that task and clearly exceeds the scripted expert's measured rate. Wrap each in the `Policy` interface so it is a drop-in demonstrator for Phase 2 (T2, T3) and base policy for Phase 3's residual RL; T1's checkpoint has no downstream demo generation and exists only to confirm baseline parity. Any task that does not reach the target keeps the scripted expert as its baseline and demo source (§11).
+
 ### Phase 2: Imitation learning and VLA
 
 #### 2a. Imitation learning
 
 **Build.**
 
-- **Demo generator:** run the expert on training seeds that are disjoint from evaluation seeds. Record front and wrist RGB, proprioception, and the 5-D action. Keep only successful episodes and log the discard rate. During collection, inject DART-style noise: execute perturbed actions but label them with the clean expert action, so the demos contain recoveries and covariate shift drops. Target 400 successful demos each for T2 and T3. T4 is optional (see §12).
+- **Demo generator:** run the frozen Phase 1b RL expert (falling back to the scripted expert for any task without a qualifying checkpoint) on training seeds that are disjoint from evaluation seeds. Record front and wrist RGB, proprioception, and the 5-D action. Keep only successful episodes and log the discard rate. During collection, inject DART-style noise: execute perturbed actions but label them with the clean expert action, so the demos contain recoveries and covariate shift drops. Target 400 successful demos each for T2 and T3. T4 is optional (see §12). Datasets and BC checkpoints already collected from the scripted expert are kept as a historical baseline, not regenerated.
 - **Dataset writing:** use the LeRobot dataset API (`LeRobotDataset.create`, `add_frame`, `save_episode`) instead of writing files by hand. The on-disk format has changed between releases, so pin the version.
 - **Policies:**
   - State BC (an MLP on oracle state). It bridges the comparison with RL.
@@ -242,7 +256,7 @@ The project is built in six phases. Each phase ends with exit criteria that must
 
 **Build.**
 
-- **Language-labeled demos.** Store an instruction string per episode in the LeRobot dataset's `task` field, using templates with paraphrases ("put the red cube in the bowl", "place the red block into the bowl"). Generate 400 T3-L demos in addition to the T2 and T3 demos.
+- **Language-labeled demos.** Store an instruction string per episode in the LeRobot dataset's `task` field, using templates with paraphrases ("put the red cube in the bowl", "place the red block into the bowl"). Generate 400 T3-L demos with the Phase 1b RL expert for T3, given each scene's named cube as the target object, in addition to the T2 and T3 demos.
 - **Fine-tune SmolVLA** (LeRobot, starting from the pretrained base checkpoint) on T2, T3, and T3-L together, with the same cameras and 5-D action space as ACT. Check the camera keys and state and action dimensions the SmolVLA config expects.
 - **Compute.** Run a short fine-tune on MPS to measure speed. If a full run would take more than about 12 hours, rent a 24-48 GB GPU for the fine-tunes (§6.3).
 
@@ -257,19 +271,19 @@ The project is built in six phases. Each phase ends with exit criteria that must
 
 **Exit criteria.** SmolVLA is evaluated on T2-L1, T3-L1, T2-L2, and T3-L with confidence intervals, its data-scaling curve exists, and its wrong-object rate is reported. No success threshold is set; results are reported as measured.
 
-### Phase 3: Reinforcement learning
+### Phase 3: Residual reinforcement learning under perturbed dynamics
 
 **Build.**
 
-- **T2-H** as defined in §5.3, with the expert headroom check done and the definition frozen before any training.
-- **State-based environments** (no images, for sample efficiency) using `SubprocVecEnv`.
-- **Pure RL:** PPO (stable-baselines3) trained from scratch with no expert. Use a dense shaped reward (reach, grasp, lift, place) plus a sparse success bonus. Inspect rollout videos to catch reward hacking.
-- **Residual RL:** $a = a_{expert}(s) + \mathrm{clip}(\pi(s), -\delta, \delta)$. Initialize the final layer near zero so training starts at expert performance. Use the same reward plus a small action penalty.
+- **T2-H** as defined in §5.3, with the Phase 1b RL expert's headroom check done and the definition frozen before any training. Because the RL expert is stronger than the scripted expert, expect to need harsher perturbations than an earlier scripted-expert-based calibration would have required.
+- **State-based environments** (no images, for sample efficiency) using `SubprocVecEnv`. This is the same design Phase 1b introduced, with the T2-H perturbations added.
+- **Pure RL on T2-H:** PPO (stable-baselines3) trained from scratch directly on the perturbed task, independent of the Phase 1b RL expert. Use a dense shaped reward (reach, grasp, lift, place) plus a sparse success bonus. Inspect rollout videos to catch reward hacking.
+- **Residual RL:** $a = a_{expert}(s) + \mathrm{clip}(\pi(s), -\delta, \delta)$, where $a_{expert}$ is the frozen Phase 1b RL expert. Initialize the final layer near zero so training starts at the RL expert's performance. Use the same reward plus a small action penalty.
 - **Throughput:** profile the environment step before running experiments, keep IK at 100 Hz, avoid per-step allocations, and record steps per second. Plan run budgets from that measured rate.
 
-**Experiments.** Five training seeds per method. Budgets: 1-3 M environment steps for residual RL and up to about 10-20 M for pure PPO, with a hard cap of 2 days of wall-clock per experiment. Produce learning curves (mean with a bootstrap CI across seeds), steps needed to reach expert-level success, and success on T2-H as a function of perturbation magnitude for the expert, residual RL, and pure RL. Pure PPO may not solve pick-and-place within this budget; the result is reported either way.
+**Experiments.** Five training seeds per method. Budgets: 1-3 M environment steps for residual RL and up to about 10-20 M for pure PPO on T2-H, with a hard cap of 2 days of wall-clock per experiment. Produce learning curves (mean with a bootstrap CI across seeds), steps needed to reach the RL expert's success rate, and success on T2-H as a function of perturbation magnitude for the RL expert, residual RL, and pure PPO on T2-H (report the scripted expert's T2-H success too, for historical context). Pure PPO may not solve pick-and-place within this budget; the result is reported either way.
 
-**Exit criteria.** Residual RL beats the scripted expert on T2-H with statistical separation: the bootstrap CI of the difference, over seeds × episodes, excludes zero. Otherwise, document a negative result with a diagnosis.
+**Exit criteria.** Residual RL beats the Phase 1b RL expert on T2-H with statistical separation: the bootstrap CI of the difference, over seeds × episodes, excludes zero. Otherwise, document a negative result with a diagnosis.
 
 ### Phase 4: Agent layer
 
@@ -344,7 +358,7 @@ Each instruction has a **goal predicate in code**, evaluated on the final simula
   - Steps to expert-level success (RL).
   - Agent: instruction success, steps to success, replan rate, and failure category.
 - **Main benchmark table.**
-  - Rows: scripted expert, state BC, image BC, ACT, Diffusion Policy, SmolVLA, pure PPO, residual PPO.
+  - Rows: scripted expert, state BC, image BC, ACT, Diffusion Policy, SmolVLA, pure PPO, residual PPO. "Pure PPO" is the Phase 1b RL expert (also the demonstrator behind every imitation-learning row); "residual PPO" is Phase 3's refinement of it.
   - **Shared columns:** T2-L1 and T2-H; every method is evaluated on both.
   - Extra columns: T3-L1, T4-L1, and T2-L2 for the methods whose observations support them, and T3-L for SmolVLA and the agent. Mark unsupported cells N/A explicitly.
   - Further columns: observation modality, training data (demos or environment steps), and training compute (CPU, MPS, or GPU hours).
@@ -373,8 +387,9 @@ Each instruction has a **goal predicate in code**, evaluated on the final simula
 | SmolVLA fine-tune slow on MPS, or setup friction | Medium | Short MPS benchmark first; rent a GPU for the full run; pin LeRobot |
 | MPS slow or unsupported ops | Medium | 128 px images, ResNet-18, fallback flag, fewer steps; rent a GPU for specific runs |
 | Python control loop too slow for RL | Medium | Profile; IK only at 100 Hz; more worker processes |
+| Phase 1b RL expert does not beat the scripted expert on some task | Medium | Keep the scripted expert as that task's demo source; proceed with the remaining tasks |
 | T2-H too easy, leaving no headroom for RL | Medium | Headroom check before training; freeze the definition |
-| RL fails to learn | Medium | Residual RL, reward shaping, curriculum; report the result |
+| Residual RL fails to learn | Medium | Fall back to the Phase 1b RL expert alone, reward shaping, curriculum; report the result |
 | VLM grounding is poor on rendered scenes | Medium | Points instead of boxes, high-contrast colors, bigger objects, a coordinate-convention test, API VLM comparison, oracle baseline |
 | Local model memory pressure | Medium | One large model at a time; smaller variants; separate processes |
 | IK library integration stalls | Low | Drive the hand with a mocap body welded to it, with the arm actuators removed |
@@ -383,16 +398,16 @@ Each instruction has a **goal predicate in code**, evaluated on the final simula
 
 ## 12. Core and optional components
 
-**Core:** scene and determinism tests, the evaluation harness, the scripted baseline, ACT, the SmolVLA fine-tune, and the write-up.
+**Core:** scene and determinism tests, the evaluation harness, the scripted baseline, a trained RL expert (Phase 1b), ACT, the SmolVLA fine-tune, and the write-up.
 
 **Optional, in decreasing priority:**
 
 1. VLA skill executor (the agent otherwise uses scripted skills)
 2. Fully local row of the ablation matrix (the oracle and API rows remain)
 3. SmolVLA data-scaling study (the main fine-tune and the robustness test remain)
-4. T4 stacking for learned policies (it remains for the scripted expert and the agent)
+4. T4 stacking for learned policies (it remains for the scripted expert, the RL expert, and the agent)
 5. Diffusion Policy (ACT remains)
-6. Pure-RL-from-scratch comparison (residual RL remains)
+6. The separate "pure PPO trained directly on T2-H" arm in Phase 3 (residual RL refining the Phase 1b RL expert remains the main comparison)
 
 ---
 

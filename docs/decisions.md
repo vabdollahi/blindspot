@@ -36,3 +36,14 @@ Measured on 2026-10-14 with `make benchmark-scene`: macOS 26.6.2, Apple M3 Max, 
 | Wrist camera | 108.7 frames/s |
 
 These local throughput figures are a reference, not a performance gate; they vary with hardware, graphics drivers, and system load. Re-run `make benchmark-scene` to update them.
+
+## Roadmap reordering: an RL expert before imitation learning (2026-10-16)
+
+After Phase 1 (scripted expert) and Phase 2.2 (state and image BC), the scripted expert's measured success on T3 and T4 fell short of its Phase 1 targets, and BC trained on its demonstrations inherited that ceiling. Rather than keep hand-tuning the scripted expert's state machine, a new **Phase 1b** was inserted between Phase 1 and Phase 2a (not "Phase 1.5": that number was already taken by the existing "1.5 Scripted expert" subsection of Phase 1):
+
+- **Pure PPO**, not residual PPO, trained from scratch on T2, T3, and T4, since it does not inherit the scripted expert's failure modes (a residual policy built on a weak base inherits that base's ceiling).
+- The frozen, best-performing checkpoint per task becomes the demonstrator for Phase 2a (BC/ACT/Diffusion Policy) and Phase 2b (SmolVLA), replacing the scripted expert as the data source. The scripted expert stays in the code and the final benchmark as a baseline row, but is no longer used to generate new training data.
+- The already-collected T2-L1 scripted-expert demos and BC checkpoints are kept as a historical baseline, not deleted or regenerated retroactively.
+- Phase 3 (previously "Phase 3: Reinforcement learning") is now specifically about residual RL refining the Phase 1b RL expert under perturbed dynamics (T2-H). Its T2-H headroom calibration (3.1) and its `ResidualWrapper` base policy now both reference the Phase 1b RL expert instead of the scripted expert; expect to recalibrate T2-H's perturbation magnitudes, since the RL expert is stronger than the scripted expert was.
+- `docs/roadmap.md` and `docs/idea.md` were updated together to reflect this order; see `docs/roadmap.md`'s Phase 1b section for the full build/evaluate/freeze steps.
+- **Scope (2026-10-16):** Phase 1b was widened from T2/T3/T4 to every non-language task — T1, T2, T3, and T4 — so the RL expert matches or beats the scripted expert across the whole non-language suite. T3-L and T5 need language conditioning (naming an object from an instruction, multi-step combinations) and stay out of scope; they continue to use the scripted expert. T1 has no object and no grasp stage, so its observation and reward collapse to TCP-to-target distance only, and it has no downstream demo generation (Phase 2a never trains on T1) — its checkpoint exists solely to confirm the RL expert reaches baseline parity on every non-language task.
