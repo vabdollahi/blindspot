@@ -3,9 +3,8 @@ import importlib
 import numpy as np
 import pytest
 
-from scripts.train_bc import _select_output_dir
-
 torch = pytest.importorskip("torch")
+pytest.importorskip("torchvision")  # policies.bc needs it; the "rl" extra installs torch without it
 bc = importlib.import_module("policies.bc")
 
 
@@ -65,6 +64,8 @@ class SyntheticBCDataset(torch.utils.data.Dataset):
 
 def test_default_bc_training_reruns_use_numbered_directories(tmp_path) -> None:
     """Keep the existing run and skip numbered output directories already used."""
+    from scripts.train_bc import _select_output_dir
+
     output_dir = tmp_path / "state"
     output_dir.mkdir()
     (tmp_path / "state-run-02").mkdir()
