@@ -2,8 +2,8 @@
 
 Profiles one environment step per task with a vectorized `SubprocVecEnv`,
 and renders a handful of random-policy rollouts to video so the staged
-reward (pre-grasp distance, the one-time grasp/lift bonus, post-grasp
-distance, and the success bonus) can be inspected by eye.
+reward (reach, grasp, carry, placed, and the success bonus) can be inspected
+by eye.
 """
 
 import argparse

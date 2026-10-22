@@ -24,6 +24,40 @@ _TCP_SITE_NAME = "tcp"
 _DOWN_ROTATION = mink.SO3.from_x_radians(math.pi)
 
 
+def tcp_pose(position: ArrayLike, yaw: float) -> mink.SE3:
+    """Return the downward-pointing TCP pose at a base-frame position and yaw."""
+    rotation = mink.SO3.from_z_radians(float(yaw)) @ _DOWN_ROTATION
+    return mink.SE3.from_rotation_and_translation(
+        rotation, np.asarray(position, dtype=np.float64)
+    )
+
+
+def next_tcp_target(
+    current_position: ArrayLike,
+    current_yaw: float,
+    command: ArrayLike,
+    *,
+    tcp_speed_limit: float = TCP_SPEED_LIMIT,
+    yaw_rate_limit: float = YAW_RATE_LIMIT,
+) -> tuple[NDArray[np.float64], float]:
+    """Return the next TCP target one environment step toward a clipped command."""
+    command_array = np.asarray(command, dtype=np.float64)
+    position = np.asarray(current_position, dtype=np.float64)
+    goal_position = np.clip(command_array[:3], WORKSPACE_LOWER, WORKSPACE_UPPER)
+    goal_yaw = float(np.clip(command_array[3], -np.pi / 2, np.pi / 2))
+
+    displacement = goal_position - position
+    distance = np.linalg.norm(displacement)
+    maximum_distance = tcp_speed_limit * ENVIRONMENT_TIMESTEP
+    if distance > maximum_distance:
+        displacement *= maximum_distance / distance
+    maximum_yaw_change = yaw_rate_limit * ENVIRONMENT_TIMESTEP
+    yaw_change = float(
+        np.clip(goal_yaw - current_yaw, -maximum_yaw_change, maximum_yaw_change)
+    )
+    return position + displacement, float(current_yaw) + yaw_change
+
+
 class ControlLoop:
     """Apply 5-D TCP actions through Mink and MuJoCo position servos."""
 
@@ -77,6 +111,21 @@ class ControlLoop:
         self._tcp_site_id = model.site(_TCP_SITE_NAME).id
         self.reset()
 
+    @property
+    def target_position(self) -> NDArray[np.float64]:
+        """Return the current rate-limited TCP position target."""
+        return self._target_position.copy()
+
+    @property
+    def target_yaw(self) -> float:
+        """Return the current rate-limited TCP yaw target."""
+        return float(self._target_yaw)
+
+    @property
+    def gripper_open_fraction(self) -> float:
+        """Return the most recently commanded gripper open fraction."""
+        return float(self._gripper_open_fraction)
+
     def reset(self) -> None:
         """Synchronize command targets with the current measured simulation state."""
         mujoco.mj_forward(self.model, self.data)
@@ -106,11 +155,14 @@ class ControlLoop:
         if not np.all(np.isfinite(command)):
             raise ValueError("Action values must all be finite")
 
-        goal_position = np.clip(command[:3], WORKSPACE_LOWER, WORKSPACE_UPPER)
-        goal_yaw = float(np.clip(command[3], -np.pi / 2, np.pi / 2))
         gripper_open_fraction = float(np.clip(command[4], 0.0, 1.0))
-        next_position = self._rate_limit_position(goal_position)
-        next_yaw = self._rate_limit_yaw(goal_yaw)
+        next_position, next_yaw = next_tcp_target(
+            self._target_position,
+            self._target_yaw,
+            command,
+            tcp_speed_limit=self.tcp_speed_limit,
+            yaw_rate_limit=self.yaw_rate_limit,
+        )
 
         start_position = self._target_position.copy()
         start_yaw = self._target_yaw
@@ -118,7 +170,7 @@ class ControlLoop:
             fraction = index / IK_STEPS_PER_ENVIRONMENT_STEP
             target_position = start_position + fraction * (next_position - start_position)
             target_yaw = start_yaw + fraction * (next_yaw - start_yaw)
-            target_pose = self._target_pose(target_position, target_yaw)
+            target_pose = tcp_pose(target_position, target_yaw)
             arm_q = self.data.qpos[self._arm_qpos_indices].copy()
             arm_target = self.ik.step(target_pose, arm_q)
             self.data.ctrl[self._arm_actuator_ids] = np.clip(
@@ -138,24 +190,6 @@ class ControlLoop:
         self._target_position = next_position
         self._target_yaw = next_yaw
         self._gripper_open_fraction = gripper_open_fraction
-
-    def _rate_limit_position(self, goal: NDArray[np.float64]) -> NDArray[np.float64]:
-        displacement = goal - self._target_position
-        distance = np.linalg.norm(displacement)
-        maximum_distance = self.tcp_speed_limit * ENVIRONMENT_TIMESTEP
-        if distance > maximum_distance:
-            displacement *= maximum_distance / distance
-        return self._target_position + displacement
-
-    def _rate_limit_yaw(self, goal: float) -> float:
-        maximum_change = self.yaw_rate_limit * ENVIRONMENT_TIMESTEP
-        change = float(np.clip(goal - self._target_yaw, -maximum_change, maximum_change))
-        return self._target_yaw + change
-
-    @staticmethod
-    def _target_pose(position: NDArray[np.float64], yaw: float) -> mink.SE3:
-        rotation = mink.SO3.from_z_radians(yaw) @ _DOWN_ROTATION
-        return mink.SE3.from_rotation_and_translation(rotation, position)
 
     def _measure_gripper_open_fraction(self) -> float:
         joint_ranges = self._finger_joint_limits[:, 1] - self._finger_joint_limits[:, 0]

@@ -12,6 +12,7 @@ These conventions apply throughout the project. They mirror the fixed design dec
 | Policy rate | 20 Hz (one environment step = 25 physics steps) |
 | Action (all learned policies) | 5-D `[x, y, z, yaw, g]`: absolute TCP target in the base frame, gripper pointing straight down, `g` in [0, 1] (≥ 0.5 means open) |
 | Action limits | xyz clipped to a workspace box in front of the base (about 45 × 60 × 40 cm above the table); yaw clipped to [−π/2, π/2] |
+| Phase 1b RL policy action | Normalized delta from the controller's TCP target: xyz ≤ 1.25 cm (one rate-limit step), yaw ≤ 0.05 rad, binary gripper; integrated into the absolute action above |
 | Residual-RL action | Bounded delta on the expert's xyz and yaw: ±2 cm, ±10° |
 | Image observations | `observation.images.front` and `observation.images.wrist`, uint8 RGB, 128 × 128 |
 | State observation | `observation.state` = joint positions (7), gripper width (1), TCP position (3), TCP yaw (1) |

@@ -74,6 +74,7 @@ Also add a **TCP site** between the fingertips. That site is the `ee` frame.
 ### 3.4 Action and observation spaces
 
 - **Learned-policy action (5-D):** an absolute TCP target in the `base` frame, given as position (3) plus yaw (1) with the gripper pointing straight down, plus a gripper command (1). Top-down grasps are enough for cubes and a bowl, and they avoid rotation-representation problems. ACT predicts absolute targets, and the Diffusion Policy paper reports that position control beats velocity control. IK and the position servos (§3.3) track this target. The VLA uses the same action space, so it compares directly with ACT.
+- **Phase 1b RL policy action:** a bounded delta from the controller's current TCP target (xyz up to one 1.25 cm rate-limit step, yaw up to 0.05 rad) plus a binary gripper. The RL wrapper, and the frozen policy's `Policy.act`, integrate it into the absolute action above. Deltas make holding still and millimeter precision closed-loop and keep exploration local, whereas absolute targets leave both open-loop and dominated by exploration noise.
 - **Residual-RL action:** a bounded delta on top of the expert's target, for example ±2 cm and ±10° yaw.
 - **Image-policy observation:** front RGB plus wrist RGB (128×128 by default, 224×224 only if needed), plus proprioception (joint positions, TCP pose, gripper width).
 - **State-policy observation:** proprioception, object poses (noisy in the hard variant), target pose, and gripper state.
@@ -220,7 +221,7 @@ In practice, the scripted expert's measured success fell short of T3 and T4's ex
 
 **Build.**
 
-- **Pure PPO, not residual RL,** trained from scratch per task, covering every non-language task (T1, T2, T3, T4), so the result does not inherit the scripted expert's failure modes. T3-L and T5 need language conditioning and stay out of scope; they keep using the scripted expert (§8, Phase 2, "Language-labeled demos"). Reuse Phase 3's state-based environment design (below) without the T2-H perturbations: proprioception, the target object's own pose (not hard-coded by color, so one policy per task generalizes to naming an arbitrary object among distractors), the destination pose, and relative vectors, with a staged dense reward (reach, grasp, lift, place) plus a sparse success bonus. T1 has no object: its observation and reward collapse to TCP-to-target distance only.
+- **Pure PPO, not residual RL,** trained from scratch per task, covering every non-language task (T1, T2, T3, T4), so the result does not inherit the scripted expert's failure modes. T3-L and T5 need language conditioning and stay out of scope; they keep using the scripted expert (§8, Phase 2, "Language-labeled demos"). Reuse Phase 3's state-based environment design (below) without the T2-H perturbations: proprioception, the target object's own pose (not hard-coded by color, so one policy per task generalizes to naming an arbitrary object among distractors), the destination pose, relative vectors, and the command state (commanded target, last gripper command), acting in bounded deltas. The reward is staged, dense and non-positive per step (reach, grasp, carry along a lifted path, place, open), plus a sparse success bonus. A training-only curriculum starts some episodes with the cube already grasped. T1 has no object: its observation and reward collapse to TCP-to-target distance plus gripper openness.
 - Train with `SubprocVecEnv`, 8-10 workers, the same PPO hyperparameters as Phase 3's pure-RL arm. Budget up to 10-20 M environment steps per task, capped at 2 days wall-clock.
 
 **Evaluate.** Run the Phase 1 evaluation harness on each trained policy, on the same evaluation seeds as the scripted expert's Phase 1 baseline.
@@ -387,7 +388,7 @@ Each instruction has a **goal predicate in code**, evaluated on the final simula
 | SmolVLA fine-tune slow on MPS, or setup friction | Medium | Short MPS benchmark first; rent a GPU for the full run; pin LeRobot |
 | MPS slow or unsupported ops | Medium | 128 px images, ResNet-18, fallback flag, fewer steps; rent a GPU for specific runs |
 | Python control loop too slow for RL | Medium | Profile; IK only at 100 Hz; more worker processes |
-| Phase 1b RL expert does not beat the scripted expert on some task | Medium | Keep the scripted expert as that task's demo source; proceed with the remaining tasks |
+| Phase 1b RL expert does not beat the scripted expert on some task | Medium | Keep the scripted expert as that task's demo source; proceed with the remaining tasks. If pure PPO falls well short, the next options are SAC/TQC with HER or BC-initialized PPO, which need a roadmap decision. |
 | T2-H too easy, leaving no headroom for RL | Medium | Headroom check before training; freeze the definition |
 | Residual RL fails to learn | Medium | Fall back to the Phase 1b RL expert alone, reward shaping, curriculum; report the result |
 | VLM grounding is poor on rendered scenes | Medium | Points instead of boxes, high-contrast colors, bigger objects, a coordinate-convention test, API VLM comparison, oracle baseline |

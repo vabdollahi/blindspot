@@ -13,21 +13,28 @@ from gymnasium import spaces
 from pydantic import BaseModel, ConfigDict, Field
 from scipy.spatial.transform import Rotation
 
-from common.seeding import named_generators
-from common.transforms import quat_wxyz_to_scipy, scipy_to_quat_wxyz
+from common.seeding import TRAIN_SEED_START, TRAIN_SEED_STOP, named_generators
+from common.transforms import (
+    quat_wxyz_to_scipy,
+    scipy_to_quat_wxyz,
+    yaw_from_quat_wxyz,
+)
 from envs.scene import build_scene
 from motion.control import (
     ENVIRONMENT_TIMESTEP,
     WORKSPACE_LOWER,
     WORKSPACE_UPPER,
     ControlLoop,
+    tcp_pose,
 )
 from motion.ik import ARM_JOINT_NAMES, MinkIK
-from skills.grasp_check import count_collisions
+from skills.grasp_check import count_collisions, is_grasped
 
 OBSERVATION_SIZE = 128
 SUCCESS_HOLD_SECONDS = 1.0
 SUCCESS_HOLD_STEPS = round(SUCCESS_HOLD_SECONDS / ENVIRONMENT_TIMESTEP)
+# Grasped-start (RL curriculum) resets lift the held cube by up to this much.
+GRASPED_START_MAX_LIFT = 0.08
 CUBE_COLORS = ("red", "blue", "green")
 BASE_CUBE_POSITIONS = {
     "cube_red": np.array([0.34, -0.20, 0.02], dtype=np.float64),
@@ -198,6 +205,13 @@ class PickPlaceEnv(gym.Env[dict[str, Any], np.ndarray]):
             ],
             dtype=np.intp,
         )
+        self._arm_dof_indices = np.asarray(
+            [
+                self.model.jnt_dofadr[self.model.joint(name).id]
+                for name in ARM_JOINT_NAMES
+            ],
+            dtype=np.intp,
+        )
         self._finger_joint_ids = np.asarray(
             [self.model.joint(name).id for name in ("finger_joint1", "finger_joint2")],
             dtype=np.intp,
@@ -224,6 +238,7 @@ class PickPlaceEnv(gym.Env[dict[str, Any], np.ndarray]):
         self._success_hold_steps = 0
         self._failure_reason: str | None = None
         self._episode_done = False
+        self._start_grasped = False
         self._target_pose = np.array([0.50, 0.0, 0.35, 0.0], dtype=np.float64)
         self._target_object = ""
         self._active_cube_names: tuple[str, ...] = ()
@@ -325,16 +340,28 @@ class PickPlaceEnv(gym.Env[dict[str, Any], np.ndarray]):
         seed: int | None = None,
         options: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Reset the task from named reproducible random streams."""
+        """Reset the task from named reproducible random streams.
+
+        `options["grasped_start_probability"]` (RL training only, default 0)
+        starts that fraction of episodes with the target cube already held in a
+        closed grasp; evaluation never sets it.
+        """
         super().reset(seed=seed)
+        grasped_start_probability = float(
+            (options or {}).get("grasped_start_probability", 0.0)
+        )
+        if not 0.0 <= grasped_start_probability <= 1.0:
+            raise ValueError("grasped_start_probability must be within [0, 1]")
         if self.level == "L2":
             self.close()
+        # Unseeded (auto-)resets stay inside the training seed range, so
+        # training never lands on a validation or evaluation seed.
         actual_seed = (
             int(seed)
             if seed is not None
-            else int(self.np_random.integers(0, np.iinfo(np.uint32).max))
+            else int(self.np_random.integers(TRAIN_SEED_START, TRAIN_SEED_STOP))
         )
-        generators = named_generators(actual_seed, ("scene", "visual"))
+        generators = named_generators(actual_seed, ("scene", "visual", "curriculum"))
         self._rng_scene = generators["scene"]
         self._rng_visual = generators["visual"]
         self._restore_model()
@@ -349,6 +376,13 @@ class PickPlaceEnv(gym.Env[dict[str, Any], np.ndarray]):
         self.data.qvel[:] = qvel
         mujoco.mj_forward(self.model, self.data)
         self.control.reset()
+        self._start_grasped = False
+        if grasped_start_probability > 0.0:
+            if not self._target_object:
+                raise ValueError(f"Task {self.task} has no object to start grasped")
+            curriculum = generators["curriculum"]
+            if curriculum.random() < grasped_start_probability:
+                self._start_grasped = self._start_with_target_grasped(curriculum)
         self._episode_steps = 0
         self._collision_count = 0
         self._success_hold_steps = 0
@@ -356,6 +390,40 @@ class PickPlaceEnv(gym.Env[dict[str, Any], np.ndarray]):
         self._episode_done = False
         self._t5_goal_index = 0
         return self._get_observation(), self._info(success=False)
+
+    def _start_with_target_grasped(self, random: np.random.Generator) -> bool:
+        """Teleport the arm into a closed grasp around the target cube and settle it."""
+        name = self._target_object
+        body_id = self.model.body(name).id
+        cube_position = self.data.xpos[body_id].copy()
+        cube_yaw = yaw_from_quat_wxyz(self.data.xquat[body_id])
+        # Cubes are 90° symmetric: grasp the face pair nearest the home yaw.
+        grasp_yaw = float((cube_yaw + np.pi / 4) % (np.pi / 2) - np.pi / 4)
+        grasp_position = cube_position.copy()
+        grasp_position[2] += float(random.uniform(0.0, GRASPED_START_MAX_LIFT))
+        arm_q, converged = self.ik.solve(
+            tcp_pose(grasp_position, grasp_yaw), self.ik.rest_q
+        )
+        if not converged:
+            return False
+
+        self.data.qpos[self._arm_qpos_indices] = arm_q
+        self.data.qvel[self._arm_dof_indices] = 0.0
+        half_width = float(self.model.geom(f"{name}_geom").size[0])
+        for joint_id in self._finger_joint_ids:
+            low, high = self.model.jnt_range[joint_id]
+            self.data.qpos[self.model.jnt_qposadr[joint_id]] = np.clip(
+                half_width, low, high
+            )
+        self._set_free_body(name, grasp_position, cube_yaw)
+        mujoco.mj_forward(self.model, self.data)
+        self.control.reset()
+        try:
+            self.control.apply(np.array([*grasp_position, grasp_yaw, 0.0]))
+        except mink.exceptions.NoSolutionFound:
+            return False
+        return is_grasped(self.model, self.data, name)
+
 
     def step(
         self,
@@ -1016,6 +1084,7 @@ class PickPlaceEnv(gym.Env[dict[str, Any], np.ndarray]):
             "episode_time": float(self.data.time),
             "instruction": self._instruction or None,
             "goal_index": self._t5_goal_index if self.task == "T5" else None,
+            "start_grasped": bool(self._start_grasped),
         }
 
 

@@ -3,7 +3,10 @@ import numpy as np
 import pytest
 from gymnasium.utils.env_checker import check_env
 
+from common.seeding import TRAIN_SEED_STOP
+from envs import pick_place_env
 from envs.pick_place_env import SUCCESS_HOLD_STEPS, PickPlaceEnv
+from skills.grasp_check import is_grasped
 
 
 def _assert_tree_equal(first: object, second: object) -> None:
@@ -43,6 +46,57 @@ def test_same_seed_reproduces_scene_and_action_trajectory() -> None:
         assert first_step[1:] == second_step[1:]
     first.close()
     second.close()
+
+
+def test_unseeded_resets_draw_only_training_seeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Auto-resets during training must never land on validation or evaluation seeds."""
+    drawn: list[int] = []
+    original = pick_place_env.named_generators
+
+    def record(seed: int, names: tuple[str, ...]) -> dict[str, np.random.Generator]:
+        drawn.append(seed)
+        return original(seed, names)
+
+    monkeypatch.setattr(pick_place_env, "named_generators", record)
+    environment = PickPlaceEnv("T2", "L1", "state")
+    environment.reset(seed=123)
+    for _ in range(50):
+        environment.reset()
+    environment.close()
+    assert drawn[0] == 123
+    assert all(0 <= seed < TRAIN_SEED_STOP for seed in drawn[1:])
+
+
+def test_grasped_start_holds_the_cube_and_keeps_the_scene_unchanged() -> None:
+    """The curriculum option closes the gripper on the cube without changing the scene."""
+    normal = PickPlaceEnv("T2", "L1", "state")
+    grasped = PickPlaceEnv("T2", "L1", "state")
+    normal_observation, normal_info = normal.reset(seed=31)
+    grasped_observation, grasped_info = grasped.reset(
+        seed=31, options={"grasped_start_probability": 1.0}
+    )
+    assert normal_info["start_grasped"] is False
+    assert grasped_info["start_grasped"] is True
+    assert is_grasped(grasped.model, grasped.data, "cube_red")
+    np.testing.assert_array_equal(
+        normal_observation["target_pose"], grasped_observation["target_pose"]
+    )
+    normal_cube = normal_observation["object_poses"]["cube_red"]["position"]
+    grasped_cube = grasped_observation["object_poses"]["cube_red"]["position"]
+    np.testing.assert_allclose(grasped_cube[:2], normal_cube[:2], atol=0.01)
+    assert grasped.control.gripper_open_fraction == 0.0
+    normal.close()
+    grasped.close()
+
+
+def test_grasped_start_probability_must_be_a_probability() -> None:
+    """Reject curriculum probabilities outside [0, 1]."""
+    environment = PickPlaceEnv("T2", "L1", "state")
+    with pytest.raises(ValueError, match="within"):
+        environment.reset(seed=0, options={"grasped_start_probability": 1.5})
+    environment.close()
 
 
 def test_different_l1_seeds_sample_different_scene_poses() -> None:

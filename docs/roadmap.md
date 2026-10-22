@@ -91,7 +91,8 @@ These apply everywhere. Each one is recorded, with its rationale, in `docs/decis
 | Joint control | Menagerie's built-in position servos; `data.ctrl` holds joint position targets |
 | IK and interpolation | `mink` differential IK on a robot-only model, run at 100 Hz (every 5 physics steps); linear waypoint interpolation |
 | Policy rate | 20 Hz (one environment step = 25 physics steps) |
-| Action (all learned policies) | 5-D `[x, y, z, yaw, g]`: absolute TCP target in the base frame, gripper pointing straight down, `g` in [0, 1] (≥ 0.5 means open) |
+| Action (all learned policies) | 5-D `[x, y, z, yaw, g]`: absolute TCP target in the base frame, gripper pointing straight down, `g` in [0, 1] (≥ 0.5 means open). The Phase 1b RL policy acts internally in bounded deltas (see the next row) that its wrapper integrates into this absolute command, so its `Policy` output is this same action. |
+| Phase 1b RL policy action | Normalized deltas from the controller's current TCP target: xyz up to one rate-limit step (1.25 cm), yaw up to 0.05 rad, binary gripper |
 | Action limits | xyz clipped to a workspace box in front of the base (about 45 × 60 × 40 cm above the table); yaw clipped to [−π/2, π/2] |
 | Residual-RL action | Bounded delta on the expert's xyz and yaw: ±2 cm, ±10° |
 | Image observations | `observation.images.front` and `observation.images.wrist`, uint8 RGB, 128 × 128 |
@@ -405,37 +406,42 @@ Pure PPO is used here, not residual PPO, specifically because it does not inheri
 
 ### 1b.1 State-based RL environment
 
-- **Observation vector:**
+- **Action:** a normalized `[-1, 1]` delta from the controller's current TCP target, integrated by the wrapper into the absolute §3 action. xyz moves at most one rate-limit step (1.25 cm, norm-clipped); yaw moves at most 0.05 rad; the gripper is binary (open if the gripper component is positive). Zero holds still, so precision and holding are closed-loop. The same command tracker runs inside the frozen policy's `Policy.act`, which returns absolute actions.
+- **Observation vector (36-D):**
   - joint positions (7) and gripper width (1)
   - TCP position (3) and yaw as (sin, cos)
-  - the target object's position (3) and yaw as (sin, cos) — passing the named object's own pose, rather than hard-coding it by color, is what lets one policy per task generalize to naming an arbitrary object among distractors later (see 1b.3); for T1, this collapses to the reach target itself, since there is no object
+  - the target object's position (3), its yaw as (sin 4θ, cos 4θ), and the grasp yaw error wrapped to [−π/4, π/4) (1). The 4θ encoding makes a cube's 90° symmetry explicit. Passing the named object's own pose, rather than hard-coding it by color, is what lets one policy per task generalize to naming an arbitrary object among distractors later (see 1b.3). For T1, this collapses to the reach target itself, since there is no object.
   - the destination pose (zone center, bowl center, the top of the stacking target, or the reach target for T1) (3)
   - relative vectors: object − TCP, destination − object (for T1, simply target − TCP)
+  - command state: commanded target − TCP (3), commanded yaw − TCP yaw (1), last gripper command (1)
+  - object displacement since the previous step (3)
   - append a one-hot expert phase only when this environment is reused for residual RL in Phase 3; omit it here
 - **Normalization:** wrap with `VecNormalize`, and save its statistics with each checkpoint.
-- **Reward,** staged and dense, shared across tasks with a task-specific destination predicate:
-  - before the grasp: negative TCP-to-object distance (for T1, this is the only stage: negative TCP-to-target distance)
-  - a bonus while the object is grasped and lifted (skipped for T1, which has no object)
-  - after the grasp: negative object-to-destination distance (zone center for T2, bowl center for T3, the stacking target's top face for T4)
-  - +10 on success
-  - a small penalty on action magnitude
+- **Reward,** staged and dense, shared across tasks with a task-specific destination. Each step pays `(staged − max) / max ∈ [−1, 0]`, a small action-magnitude penalty, and +10 on success. Every stage's best value exceeds every earlier stage's, so the policy is always pulled forward, and per-step rewards are never positive, so finishing sooner always pays. `proximity(d)` averages `1 − tanh(k·d)` for k = 2, 8, 30 m⁻¹, giving a gradient both across the ≈0.5 m starting distance and within millimeters.
+  - T1: `proximity(TCP-to-target) + gripper openness` (max 2)
+  - T2-T4, not yet placed: `proximity(TCP-to-object) + grasped · (1 + proximity(object-to-carry-path))`. The carry path sits 6 cm above the destination and blends down to it within 5 cm horizontally, so it lifts, carries, then descends.
+  - T2-T4, placed (object within 1.5 cm of the destination): `4 + gripper openness` (max 5). Releasing there never lowers the reward, and opening raises it.
+- **Curriculum (training only):** 30% of object-task training episodes start with the cube already in a closed grasp, at a random lift of 0-8 cm. This is an opt-in `PickPlaceEnv` reset option driven by its own named seed stream. Validation and evaluation never use it.
+- **Seeds:** unseeded training auto-resets draw only from the training seed range (§3).
 - Run `stable-baselines3`'s `SubprocVecEnv` with 8-10 workers. Each worker builds its own MuJoCo model.
 
 **Check:**
 
 - Profile one environment step and record steps per second.
 - Render 5 rollouts of a random policy per task to video and confirm the reward components behave as intended.
+- The scripted expert, replayed through the delta action space, succeeds and passes through every reward stage.
 
 ### 1b.2 Train pure PPO per task
 
 - Train one policy each for T1, T2, T3, and T4 at L1, sharing the observation and reward structure above.
 - Start from these hyperparameters:
-  - `n_envs=8`, `n_steps=512`, `batch_size=1024`, `n_epochs=10`
-  - `learning_rate=3e-4`, `gamma=0.99`, `gae_lambda=0.95`, `clip_range=0.2`
-  - policy and value networks of [256, 256]
+  - `n_envs=8`, `n_steps=2048`, `batch_size=1024`, `n_epochs=10`
+  - `learning_rate=3e-4`, `gamma=0.99`, `gae_lambda=0.95`, `clip_range=0.2`, `target_kl=0.03`
+  - policy and value networks of [256, 256], `log_std_init=-0.5`, `ent_coef=0` (gSDE and an entropy bonus are available as options, off by default)
 - Budget up to 10-20 M environment steps per task, with a hard cap of 2 days of wall-clock per run. Use 3 training seeds per task here; the full 5-seed statistical comparison is reserved for Phase 3.
+- Resume a checkpoint only to extend its step budget; a reward or observation change requires a fresh run, because the value function and `VecNormalize` statistics depend on both.
 
-**Check:** the learning curve (success on validation seeds every 100k steps) is logged for each task and seed.
+**Check:** the learning curve (success on validation seeds every 100k steps) is logged for each task and seed. Each rollout's training success rate, stage funnel (reached, grasped, lifted, placed), per-term reward sums, and PPO diagnostics (std, KL, explained variance) are logged to `logs/progress.csv`.
 
 ### 1b.3 Select and freeze the RL expert
 
@@ -589,10 +595,7 @@ Reuse the Phase 1b environment and reward (1b.1) for T2, with two additions:
 ### 3.3 Pure PPO on T2-H
 
 - Train a fresh PPO policy directly on the perturbed T2-H environment, independent of the Phase 1b RL expert (which was trained on clean T2 and is used as the demo source). This tests whether training directly on the harder distribution is competitive with refining the clean-trained expert.
-- Start from these hyperparameters:
-  - `n_envs=8`, `n_steps=512`, `batch_size=1024`, `n_epochs=10`
-  - `learning_rate=3e-4`, `gamma=0.99`, `gae_lambda=0.95`, `clip_range=0.2`
-  - policy and value networks of [256, 256]
+- Start from the same hyperparameters as 1b.2.
 - Budget up to 10-20 M environment steps, with a hard cap of 2 days of wall-clock per run.
 
 **Check:** the learning curve (success on validation seeds every 100k steps) is logged for 5 training seeds.
@@ -824,7 +827,7 @@ Run the final evaluations for every method under the rules in §5. The main tabl
 | LeRobot integration stalls | Pin a known-good LeRobot version; otherwise use the minimal ACT from 2.3 |
 | MPS is too slow or lacks ops | Set `PYTORCH_ENABLE_MPS_FALLBACK=1`, use 128 px images and fewer steps, and rent a GPU for specific runs |
 | RL environment too slow | Profile, run IK only at 100 Hz, avoid per-step allocations, add workers |
-| The Phase 1b RL expert does not beat the scripted expert on some task | Keep the scripted expert as that task's demo source, note it in the benchmark, and do not block Phase 2a/2b on every task |
+| The Phase 1b RL expert does not beat the scripted expert on some task | Keep the scripted expert as that task's demo source, note it in the benchmark, and do not block Phase 2a/2b on every task. If pure PPO falls well short after about 10 M steps, the next options are off-policy SAC/TQC with HER (T2 is goal-conditioned), or PPO initialized by BC from scripted demos. Both depart from "pure PPO, no expert" and need a roadmap decision first. |
 | T2-H gives no headroom | Re-run the 3.1 calibration before training anything |
 | Residual RL does not learn | Fall back to the Phase 1b RL expert alone, add a curriculum (start with small perturbations), and report the result |
 | VLM grounding is poor | Ask for points instead of boxes, raise color contrast, enlarge objects, verify the coordinate adapter, compare with the API VLM |

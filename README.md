@@ -44,6 +44,76 @@ make report
 
 By default, the report is written to `eval/results/report.md` and `eval/results/success-rates.png`. Use `REPORT_ARGS="--results-dir PATH --output-dir PATH"` to read results from or write reports to other directories. Both `evaluate` and `baseline` accept `--results-dir PATH` through their corresponding `*_ARGS` variable.
 
+## Reinforcement learning (Phase 1b)
+
+Phase 1b trains a pure-PPO policy for each non-language task (T1-T4) from scratch, with no dependency on the scripted expert. Once a task's checkpoint qualifies, it replaces the scripted expert as the demonstrator for imitation learning (see [the roadmap](docs/roadmap.md)).
+
+- **Action:** bounded deltas from the controller's TCP target and a binary gripper. A shared command tracker integrates them into the absolute `[x, y, z, yaw, g]` action, so a frozen checkpoint is a drop-in `Policy` like any other.
+- **Reward:** staged and non-positive per step (reach → grasp → carry → place → open), plus a success bonus.
+- **Curriculum:** by default, 30% of object-task training episodes start with the cube already grasped.
+
+The [decision log](docs/decisions.md#phase-1b-rl-environment-design-envsrl_envpy-2026-10-22) explains these choices.
+
+![Pure-PPO policy placing the red cube in the target zone (T2-L1, evaluation seed 1,000,030)](docs/media/t2-l1-pure-ppo.gif)
+
+*Pure-PPO T2-L1 policy (seed 0, best validation checkpoint) on evaluation seed 1,000,030: reach, grasp, carry, place, release.*
+
+Profile the vectorized environment's throughput and render random-policy rollouts to sanity-check the reward stages:
+
+```sh
+make benchmark-rl-env
+```
+
+Train one `(task, level, seed)` PPO expert (defaults match the roadmap: 8 parallel environments, 10M environment steps, seed 0):
+
+```sh
+make train-rl RL_ARGS="--task T1 --level L1"
+```
+
+For a quick smoke run instead of a full 10M-step training job, scale the budget down:
+
+```sh
+make train-rl RL_ARGS="--task T1 --level L1 --total-timesteps 20000 --eval-freq 5000 --eval-episodes 5"
+```
+
+Training prints a validation-seed success rate every `--eval-freq` steps. Every rollout also prints, and appends to `logs/progress.csv`:
+
+- the training success rate;
+- a stage funnel (`funnel/reached`, `grasped`, `lifted`, `placed`): the fraction of normal-start episodes that reached each stage, which is the quickest way to see which stage limits a run;
+- per-term reward sums (`reward/*`) and PPO diagnostics (`train/std`, `train/approx_kl`, `train/explained_variance`).
+
+The final checkpoint, its `VecNormalize` observation statistics, and a `run.json` record (full config, git commit, hardware, and the validation learning curve) are written under `checkpoints/rl/<task>-<level>/seed-<seed>/`. The roadmap calls for 3 training seeds per task; run the command once per `--seed`.
+
+While training runs, the same directory also accumulates resumable intermediate checkpoints: `checkpoints/step_<N>/` every `--checkpoint-freq` steps (defaults to `--eval-freq`; only the last `--keep-last`, default 2, are kept), and a `best/` snapshot that's overwritten whenever the validation success rate improves. Both use the same `model.zip` + `vecnormalize.pkl` layout as the final checkpoint, so either is a valid `--resume-from` target, for example to recover from an interrupted run or to continue from the best validation point.
+
+To extend a run's step budget, pass `--resume-from`. The checkpoint's own hyperparameters (learning rate, network size, and so on) are reused; only `--n-envs`, `--total-timesteps`, `--eval-freq`, `--eval-episodes`, `--checkpoint-freq`, `--keep-last`, `--grasped-start-probability`, and `--device` apply, and `--total-timesteps` counts additional steps. A resumed run writes to a new, auto-versioned output directory and never overwrites its source checkpoint. A reward or observation change requires a fresh run instead, because the value function and normalization statistics depend on both:
+
+```sh
+make train-rl RL_ARGS="--task T1 --level L1 --resume-from checkpoints/rl/t1-l1/seed-0 --total-timesteps 5000000"
+```
+
+The learning curve in `run.json` is an in-training signal on a small, fixed set of validation seeds. For a reportable result (100 episodes on the evaluation-seed range, with a Wilson 95% interval, through the same harness as the scripted expert and BC), evaluate the checkpoint directly:
+
+```sh
+make evaluate-rl RL_EVAL_ARGS="--checkpoint-dir checkpoints/rl/t1-l1/seed-0 --task T1 --level L1 --episodes 100"
+```
+
+Results are written as JSON under `eval/results/pure-ppo/<task>-<level>.json`, matching the scripted expert's and BC's result format.
+
+To watch a checkpoint run in the MuJoCo passive viewer:
+
+```sh
+make view-rl RL_VIEW_ARGS="--checkpoint-dir checkpoints/rl/t1-l1/seed-0 --task T1 --level L1 --seed 1000000"
+```
+
+Close the viewer after the episode result is printed. Use `--device cpu` (the default) to avoid accelerator overhead for single-episode inference, or `--show-tcp` to display the TCP marker.
+
+To save the episode as a looping GIF instead of opening the viewer, add `--gif PATH`; the episode is rendered offscreen from the viewer's camera angle. `--gif-fps` (default 10, subsampled from the 20 Hz policy rate) and `--gif-width`/`--gif-height` (default 480×360, up to the scene's 512×512 offscreen buffer) control the output. The GIF above was produced with:
+
+```sh
+make view-rl RL_VIEW_ARGS="--checkpoint-dir checkpoints/rl/t2-l1/seed-0/best --task T2 --level L1 --seed 1000030 --gif docs/media/t2-l1-pure-ppo.gif"
+```
+
 ## Demonstrations
 
 Install the optional pinned LeRobot dataset dependency and generate 400 successful T2-L1 and T3-L1 demonstrations (380 training episodes and 20 validation episodes per task):
