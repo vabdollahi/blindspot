@@ -50,13 +50,17 @@ Phase 1b trains a pure-PPO policy for each non-language task (T1-T4) from scratc
 
 - **Action:** bounded deltas from the controller's TCP target and a binary gripper. A shared command tracker integrates them into the absolute `[x, y, z, yaw, g]` action, so a frozen checkpoint is a drop-in `Policy` like any other.
 - **Reward:** staged and non-positive per step (reach → grasp → carry → place → open), plus a success bonus.
-- **Curriculum:** by default, 30% of object-task training episodes start with the cube already grasped.
+- **Curriculum:** by default, 30% of object-task training episodes start with the cube already grasped. `--destination-start-fraction` optionally starts some of those partway along the path to the destination, which long carries such as T3's need.
 
 The [decision log](docs/decisions.md#phase-1b-rl-environment-design-envsrl_envpy-2026-10-22) explains these choices.
 
 ![Pure-PPO policy placing the red cube in the target zone (T2-L1, evaluation seed 1,000,030)](docs/media/t2-l1-pure-ppo.gif)
 
 *Pure-PPO T2-L1 policy (seed 0, best validation checkpoint) on evaluation seed 1,000,030: reach, grasp, carry, place, release.*
+
+![Pure-PPO policy carrying a cube into the bowl (T3-L1)](docs/media/t3-l1-pure-ppo.gif)
+
+*Pure-PPO T3-L1 policy (seed 0, best validation checkpoint) on a held-out evaluation seed: the cube is carried 30-50 cm and released into the bowl. Trained with destination-side grasped starts (`--grasped-start-probability 0.5 --destination-start-fraction 0.6`), a reverse curriculum in which some episodes begin with the cube already held on the way to the bowl, so the policy learns to place and release before it can carry that far.*
 
 Profile the vectorized environment's throughput and render random-policy rollouts to sanity-check the reward stages:
 
@@ -70,6 +74,12 @@ Train one `(task, level, seed)` PPO expert (defaults match the roadmap: 8 parall
 make train-rl RL_ARGS="--task T1 --level L1"
 ```
 
+T3's bowl sits 30-50 cm from the cube, so train it with destination-side starts:
+
+```sh
+make train-rl RL_ARGS="--task T3 --level L1 --grasped-start-probability 0.5 --destination-start-fraction 0.6"
+```
+
 For a quick smoke run instead of a full 10M-step training job, scale the budget down:
 
 ```sh
@@ -79,14 +89,14 @@ make train-rl RL_ARGS="--task T1 --level L1 --total-timesteps 20000 --eval-freq 
 Training prints a validation-seed success rate every `--eval-freq` steps. Every rollout also prints, and appends to `logs/progress.csv`:
 
 - the training success rate;
-- a stage funnel (`funnel/reached`, `grasped`, `lifted`, `placed`): the fraction of normal-start episodes that reached each stage, which is the quickest way to see which stage limits a run;
+- a stage funnel (`funnel/reached`, `grasped`, `lifted`, `carried`, `placed`): the fraction of normal-start episodes that reached each stage, which is the quickest way to see which stage limits a run;
 - per-term reward sums (`reward/*`) and PPO diagnostics (`train/std`, `train/approx_kl`, `train/explained_variance`).
 
 The final checkpoint, its `VecNormalize` observation statistics, and a `run.json` record (full config, git commit, hardware, and the validation learning curve) are written under `checkpoints/rl/<task>-<level>/seed-<seed>/`. The roadmap calls for 3 training seeds per task; run the command once per `--seed`.
 
 While training runs, the same directory also accumulates resumable intermediate checkpoints: `checkpoints/step_<N>/` every `--checkpoint-freq` steps (defaults to `--eval-freq`; only the last `--keep-last`, default 2, are kept), and a `best/` snapshot that's overwritten whenever the validation success rate improves. Both use the same `model.zip` + `vecnormalize.pkl` layout as the final checkpoint, so either is a valid `--resume-from` target, for example to recover from an interrupted run or to continue from the best validation point.
 
-To extend a run's step budget, pass `--resume-from`. The checkpoint's own hyperparameters (learning rate, network size, and so on) are reused; only `--n-envs`, `--total-timesteps`, `--eval-freq`, `--eval-episodes`, `--checkpoint-freq`, `--keep-last`, `--grasped-start-probability`, and `--device` apply, and `--total-timesteps` counts additional steps. A resumed run writes to a new, auto-versioned output directory and never overwrites its source checkpoint. A reward or observation change requires a fresh run instead, because the value function and normalization statistics depend on both:
+To extend a run's step budget, pass `--resume-from`. The checkpoint's own hyperparameters (learning rate, network size, and so on) are reused; only `--n-envs`, `--total-timesteps`, `--eval-freq`, `--eval-episodes`, `--checkpoint-freq`, `--keep-last`, `--grasped-start-probability`, `--destination-start-fraction`, and `--device` apply, and `--total-timesteps` counts additional steps. A resumed run writes to a new, auto-versioned output directory and never overwrites its source checkpoint. A reward or observation change requires a fresh run instead, because the value function and normalization statistics depend on both:
 
 ```sh
 make train-rl RL_ARGS="--task T1 --level L1 --resume-from checkpoints/rl/t1-l1/seed-0 --total-timesteps 5000000"
@@ -108,7 +118,7 @@ make view-rl RL_VIEW_ARGS="--checkpoint-dir checkpoints/rl/t1-l1/seed-0 --task T
 
 Close the viewer after the episode result is printed. Use `--device cpu` (the default) to avoid accelerator overhead for single-episode inference, or `--show-tcp` to display the TCP marker.
 
-To save the episode as a looping GIF instead of opening the viewer, add `--gif PATH`; the episode is rendered offscreen from the viewer's camera angle. `--gif-fps` (default 10, subsampled from the 20 Hz policy rate) and `--gif-width`/`--gif-height` (default 480×360, up to the scene's 512×512 offscreen buffer) control the output. The GIF above was produced with:
+To save the episode as a looping GIF instead of opening the viewer, add `--gif PATH`; the episode is rendered offscreen from the viewer's camera angle. `--gif-fps` (default 10, subsampled from the 20 Hz policy rate) and `--gif-width`/`--gif-height` (default 480×360, up to the scene's 512×512 offscreen buffer) control the output. The GIFs above were produced this way from each task's best checkpoint, for example:
 
 ```sh
 make view-rl RL_VIEW_ARGS="--checkpoint-dir checkpoints/rl/t2-l1/seed-0/best --task T2 --level L1 --seed 1000030 --gif docs/media/t2-l1-pure-ppo.gif"

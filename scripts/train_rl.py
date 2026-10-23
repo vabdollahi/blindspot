@@ -50,7 +50,8 @@ def _parse_args() -> argparse.Namespace:
         help="Continue training from an existing checkpoint directory "
         "(model.zip + vecnormalize.pkl) instead of starting a fresh policy. "
         "Only --n-envs/--total-timesteps/--eval-freq/--eval-episodes/--device/"
-        "--grasped-start-probability apply; the checkpoint's own "
+        "--grasped-start-probability/--destination-start-fraction apply; the "
+        "checkpoint's own "
         "hyperparameters are reused unchanged.",
     )
     parser.add_argument("--n-envs", type=int, default=8)
@@ -81,6 +82,13 @@ def _parse_args() -> argparse.Namespace:
         default=0.3,
         help="Fraction of object-task training episodes that start with the "
         "cube already grasped (curriculum; ignored for T1 and evaluation).",
+    )
+    parser.add_argument(
+        "--destination-start-fraction",
+        type=float,
+        default=0.0,
+        help="Fraction of grasped starts that begin partway along the path to "
+        "the destination, held above it (reverse curriculum for long carries).",
     )
     parser.add_argument("--total-timesteps", type=int, default=10_000_000)
     parser.add_argument("--eval-freq", type=int, default=100_000)
@@ -155,6 +163,7 @@ def main() -> None:
         use_sde=arguments.use_sde,
         sde_sample_freq=arguments.sde_sample_freq,
         grasped_start_probability=arguments.grasped_start_probability,
+        destination_start_fraction=arguments.destination_start_fraction,
         total_timesteps=arguments.total_timesteps,
         eval_freq=arguments.eval_freq,
         eval_episodes=arguments.eval_episodes,

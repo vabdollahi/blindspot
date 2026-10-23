@@ -35,6 +35,9 @@ SUCCESS_HOLD_SECONDS = 1.0
 SUCCESS_HOLD_STEPS = round(SUCCESS_HOLD_SECONDS / ENVIRONMENT_TIMESTEP)
 # Grasped-start (RL curriculum) resets lift the held cube by up to this much.
 GRASPED_START_MAX_LIFT = 0.08
+# Destination-side grasped starts hold the cube this far above the destination,
+# clearing a bowl rim or the support cube.
+DESTINATION_START_HEIGHT = (0.06, 0.09)
 CUBE_COLORS = ("red", "blue", "green")
 BASE_CUBE_POSITIONS = {
     "cube_red": np.array([0.34, -0.20, 0.02], dtype=np.float64),
@@ -342,16 +345,23 @@ class PickPlaceEnv(gym.Env[dict[str, Any], np.ndarray]):
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """Reset the task from named reproducible random streams.
 
-        `options["grasped_start_probability"]` (RL training only, default 0)
-        starts that fraction of episodes with the target cube already held in a
-        closed grasp; evaluation never sets it.
+        RL training curriculum options (evaluation never sets them):
+        `options["grasped_start_probability"]` (default 0) starts that fraction
+        of episodes with the target cube already held in a closed grasp, and
+        `options["destination_start_fraction"]` (default 0) starts that fraction
+        of those grasped episodes partway along the path to the destination.
         """
         super().reset(seed=seed)
         grasped_start_probability = float(
             (options or {}).get("grasped_start_probability", 0.0)
         )
+        destination_start_fraction = float(
+            (options or {}).get("destination_start_fraction", 0.0)
+        )
         if not 0.0 <= grasped_start_probability <= 1.0:
             raise ValueError("grasped_start_probability must be within [0, 1]")
+        if not 0.0 <= destination_start_fraction <= 1.0:
+            raise ValueError("destination_start_fraction must be within [0, 1]")
         if self.level == "L2":
             self.close()
         # Unseeded (auto-)resets stay inside the training seed range, so
@@ -382,7 +392,14 @@ class PickPlaceEnv(gym.Env[dict[str, Any], np.ndarray]):
                 raise ValueError(f"Task {self.task} has no object to start grasped")
             curriculum = generators["curriculum"]
             if curriculum.random() < grasped_start_probability:
-                self._start_grasped = self._start_with_target_grasped(curriculum)
+                # Drawn only when enabled, so the default leaves the stream unchanged.
+                toward_destination = (
+                    destination_start_fraction > 0.0
+                    and curriculum.random() < destination_start_fraction
+                )
+                self._start_grasped = self._start_with_target_grasped(
+                    curriculum, toward_destination=toward_destination
+                )
         self._episode_steps = 0
         self._collision_count = 0
         self._success_hold_steps = 0
@@ -391,8 +408,18 @@ class PickPlaceEnv(gym.Env[dict[str, Any], np.ndarray]):
         self._t5_goal_index = 0
         return self._get_observation(), self._info(success=False)
 
-    def _start_with_target_grasped(self, random: np.random.Generator) -> bool:
-        """Teleport the arm into a closed grasp around the target cube and settle it."""
+    def _start_with_target_grasped(
+        self,
+        random: np.random.Generator,
+        *,
+        toward_destination: bool = False,
+    ) -> bool:
+        """Teleport the arm into a closed grasp around the target cube and settle it.
+
+        By default the cube is held above its sampled table position; with
+        `toward_destination`, it is held at a random point along the straight
+        path to the destination, at `DESTINATION_START_HEIGHT` above it.
+        """
         name = self._target_object
         body_id = self.model.body(name).id
         cube_position = self.data.xpos[body_id].copy()
@@ -400,7 +427,15 @@ class PickPlaceEnv(gym.Env[dict[str, Any], np.ndarray]):
         # Cubes are 90° symmetric: grasp the face pair nearest the home yaw.
         grasp_yaw = float((cube_yaw + np.pi / 4) % (np.pi / 2) - np.pi / 4)
         grasp_position = cube_position.copy()
-        grasp_position[2] += float(random.uniform(0.0, GRASPED_START_MAX_LIFT))
+        if toward_destination:
+            destination = self._current_target_pose()[:3]
+            progress = float(random.uniform(0.0, 1.0))
+            grasp_position[:2] += progress * (destination[:2] - cube_position[:2])
+            grasp_position[2] = destination[2] + float(
+                random.uniform(*DESTINATION_START_HEIGHT)
+            )
+        else:
+            grasp_position[2] += float(random.uniform(0.0, GRASPED_START_MAX_LIFT))
         arm_q, converged = self.ik.solve(
             tcp_pose(grasp_position, grasp_yaw), self.ik.rest_q
         )

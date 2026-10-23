@@ -64,6 +64,7 @@ ACTION_PENALTY_WEIGHT = 0.001
 # Stage-funnel thresholds, used only for training diagnostics.
 REACHED_DISTANCE = 0.02
 LIFTED_HEIGHT = 0.02
+CARRIED_DISTANCE = CARRY_BLEND_DISTANCE
 
 OBJECT_REWARD_TERMS = (
     "reach",
@@ -290,11 +291,14 @@ class PickPlaceRLEnv(gym.Wrapper[np.ndarray, np.ndarray, dict[str, Any], np.ndar
         *,
         render_mode: str | None = None,
         grasped_start_probability: float = 0.0,
+        destination_start_fraction: float = 0.0,
     ) -> None:
         """Wrap a non-language `PickPlaceEnv` task with Box spaces and the reward.
 
-        `grasped_start_probability` (training only) starts that fraction of
-        object-task episodes with the cube already held; it is ignored for T1.
+        Training-only curriculum, ignored for T1: `grasped_start_probability`
+        starts that fraction of object-task episodes with the cube already
+        held, and `destination_start_fraction` starts that fraction of those
+        partway along the path to the destination.
         """
         normalized_task = task.strip().upper()
         if normalized_task not in RL_TASKS:
@@ -303,6 +307,8 @@ class PickPlaceRLEnv(gym.Wrapper[np.ndarray, np.ndarray, dict[str, Any], np.ndar
             )
         if not 0.0 <= grasped_start_probability <= 1.0:
             raise ValueError("grasped_start_probability must be within [0, 1]")
+        if not 0.0 <= destination_start_fraction <= 1.0:
+            raise ValueError("destination_start_fraction must be within [0, 1]")
         self._task_env = PickPlaceEnv(
             normalized_task, level, "state", render_mode=render_mode
         )
@@ -317,6 +323,9 @@ class PickPlaceRLEnv(gym.Wrapper[np.ndarray, np.ndarray, dict[str, Any], np.ndar
         self.command_tracker = DeltaCommandTracker()
         self._grasped_start_probability = (
             0.0 if normalized_task == "T1" else float(grasped_start_probability)
+        )
+        self._destination_start_fraction = (
+            0.0 if normalized_task == "T1" else float(destination_start_fraction)
         )
         self._reward_max = (
             REACH_TASK_REWARD_MAX if normalized_task == "T1" else OBJECT_TASK_REWARD_MAX
@@ -338,6 +347,10 @@ class PickPlaceRLEnv(gym.Wrapper[np.ndarray, np.ndarray, dict[str, Any], np.ndar
         if self._grasped_start_probability > 0.0:
             reset_options.setdefault(
                 "grasped_start_probability", self._grasped_start_probability
+            )
+        if self._destination_start_fraction > 0.0:
+            reset_options.setdefault(
+                "destination_start_fraction", self._destination_start_fraction
             )
         dict_observation, info = self.env.reset(seed=seed, options=reset_options)
         control = self._task_env.control
@@ -438,7 +451,7 @@ class PickPlaceRLEnv(gym.Wrapper[np.ndarray, np.ndarray, dict[str, Any], np.ndar
             "reached": 0.0,
         }
         if self.task != "T1":
-            stats.update(grasped=0.0, lifted=0.0, placed=0.0)
+            stats.update(grasped=0.0, lifted=0.0, carried=0.0, placed=0.0)
         stats.update({f"reward/{name}": 0.0 for name in self._reward_terms})
         return stats
 
@@ -461,8 +474,15 @@ class PickPlaceRLEnv(gym.Wrapper[np.ndarray, np.ndarray, dict[str, Any], np.ndar
         stats["success"] = float(terminated)
         if self.task != "T1":
             lift = object_position[2] - self._object_rest_height
+            destination = np.asarray(
+                dict_observation["target_pose"][:2], dtype=np.float64
+            )
+            horizontal = float(np.linalg.norm(object_position[:2] - destination))
             stats["grasped"] = max(stats["grasped"], terms["grasp"])
             stats["lifted"] = max(stats["lifted"], float(lift >= LIFTED_HEIGHT))
+            stats["carried"] = max(
+                stats["carried"], float(horizontal <= CARRIED_DISTANCE)
+            )
             stats["placed"] = max(stats["placed"], float(terms["placed"] > 0.0))
         for name, value in terms.items():
             stats[f"reward/{name}"] += value
@@ -481,6 +501,7 @@ def make_rl_env(
     *,
     render_mode: str | None = None,
     grasped_start_probability: float = 0.0,
+    destination_start_fraction: float = 0.0,
 ) -> Callable[[], PickPlaceRLEnv]:
     """Return a zero-argument factory building one env, for vectorized workers.
 
@@ -495,6 +516,7 @@ def make_rl_env(
             level,
             render_mode=render_mode,
             grasped_start_probability=grasped_start_probability,
+            destination_start_fraction=destination_start_fraction,
         )
 
     return _make

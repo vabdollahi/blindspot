@@ -23,7 +23,7 @@ from envs.rl_env import (
 from eval.policy import Policy
 
 # Per-episode statistics (`PickPlaceRLEnv` info["rl_episode"]) logged as stage-funnel rates.
-_FUNNEL_KEYS = ("reached", "grasped", "lifted", "placed")
+_FUNNEL_KEYS = ("reached", "grasped", "lifted", "carried", "placed")
 
 
 class RLTrainingConfig(BaseModel):
@@ -46,6 +46,7 @@ class RLTrainingConfig(BaseModel):
     use_sde: bool = False
     sde_sample_freq: int = Field(default=-1, ge=-1)
     grasped_start_probability: float = Field(default=0.3, ge=0.0, le=1.0)
+    destination_start_fraction: float = Field(default=0.0, ge=0.0, le=1.0)
     total_timesteps: int = Field(default=10_000_000, ge=1)
     eval_freq: int = Field(default=100_000, ge=1)
     eval_episodes: int = Field(default=20, ge=1)
@@ -293,6 +294,7 @@ def _training_vec_env(task: str, level: str, config: RLTrainingConfig) -> Subpro
                 task,
                 level,
                 grasped_start_probability=config.grasped_start_probability,
+                destination_start_fraction=config.destination_start_fraction,
             )
             for _ in range(config.n_envs)
         ],
@@ -356,9 +358,10 @@ def resume_ppo_expert(
     """Continue training an existing Phase 1b checkpoint for more steps.
 
     Only `config.n_envs`, `total_timesteps`, `eval_freq`, `eval_episodes`, `seed`,
-    `grasped_start_probability`, and `device` apply; the learning rate, clip
-    range, network architecture, and other hyperparameters come from the
-    checkpoint, as with any `stable_baselines3` resume. Resuming is meant for
+    `grasped_start_probability`, `destination_start_fraction`, and `device`
+    apply; the learning rate, clip range, network architecture, and other
+    hyperparameters come from the checkpoint, as with any `stable_baselines3`
+    resume. Resuming is meant for
     extending a run under the same reward and observation; after changing
     either, train a fresh model (roadmap 1b.2).
     """

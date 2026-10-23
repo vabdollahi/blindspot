@@ -374,7 +374,7 @@ def test_episode_statistics_are_reported_when_the_episode_ends() -> None:
     episode = info["rl_episode"]
     assert episode["length"] == steps
     assert episode["success"] == 0.0
-    assert {"reached", "grasped", "lifted", "placed", "min_distance"} <= set(episode)
+    assert {"reached", "grasped", "lifted", "carried", "placed"} <= set(episode)
     assert episode["return"] == pytest.approx(total_reward)
     assert episode["reward/success"] == 0.0
     environment.close()
@@ -390,7 +390,7 @@ def test_scripted_expert_replay_succeeds_through_every_stage() -> None:
     )
     assert stages == {"reach", "carry", "placed"}
     assert episode["reached"] == episode["grasped"] == episode["lifted"] == 1.0
-    assert episode["placed"] == episode["success"] == 1.0
+    assert episode["carried"] == episode["placed"] == episode["success"] == 1.0
 
     environment.reset(seed=2026)
     idle_return = 0.0

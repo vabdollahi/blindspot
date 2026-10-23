@@ -421,7 +421,7 @@ Pure PPO is used here, not residual PPO, specifically because it does not inheri
   - T1: `proximity(TCP-to-target) + gripper openness` (max 2)
   - T2-T4, not yet placed: `proximity(TCP-to-object) + grasped · (1 + proximity(object-to-carry-path))`. The carry path sits 6 cm above the destination and blends down to it within 5 cm horizontally, so it lifts, carries, then descends.
   - T2-T4, placed (object within 1.5 cm of the destination): `4 + gripper openness` (max 5). Releasing there never lowers the reward, and opening raises it.
-- **Curriculum (training only):** 30% of object-task training episodes start with the cube already in a closed grasp, at a random lift of 0-8 cm. This is an opt-in `PickPlaceEnv` reset option driven by its own named seed stream. Validation and evaluation never use it.
+- **Curriculum (training only):** 30% of object-task training episodes start with the cube already in a closed grasp, at a random lift of 0-8 cm. An optional `destination_start_fraction` (off by default) starts that fraction of grasped episodes at a random point along the path to the destination instead, 6-9 cm above it, so placing and releasing are practiced from the outset and long carries are learned backward from the goal. Use it for T3, whose bowl sits 30-50 cm from the cube (`--grasped-start-probability 0.5 --destination-start-fraction 0.6`). Both are opt-in `PickPlaceEnv` reset options driven by their own named seed stream. Validation and evaluation never use them.
 - **Seeds:** unseeded training auto-resets draw only from the training seed range (§3).
 - Run `stable-baselines3`'s `SubprocVecEnv` with 8-10 workers. Each worker builds its own MuJoCo model.
 
@@ -441,7 +441,7 @@ Pure PPO is used here, not residual PPO, specifically because it does not inheri
 - Budget up to 10-20 M environment steps per task, with a hard cap of 2 days of wall-clock per run. Use 3 training seeds per task here; the full 5-seed statistical comparison is reserved for Phase 3.
 - Resume a checkpoint only to extend its step budget; a reward or observation change requires a fresh run, because the value function and `VecNormalize` statistics depend on both.
 
-**Check:** the learning curve (success on validation seeds every 100k steps) is logged for each task and seed. Each rollout's training success rate, stage funnel (reached, grasped, lifted, placed), per-term reward sums, and PPO diagnostics (std, KL, explained variance) are logged to `logs/progress.csv`.
+**Check:** the learning curve (success on validation seeds every 100k steps) is logged for each task and seed. Each rollout's training success rate, stage funnel (reached, grasped, lifted, carried, placed), per-term reward sums, and PPO diagnostics (std, KL, explained variance) are logged to `logs/progress.csv`.
 
 ### 1b.3 Select and freeze the RL expert
 

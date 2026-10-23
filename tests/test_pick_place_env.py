@@ -96,7 +96,57 @@ def test_grasped_start_probability_must_be_a_probability() -> None:
     environment = PickPlaceEnv("T2", "L1", "state")
     with pytest.raises(ValueError, match="within"):
         environment.reset(seed=0, options={"grasped_start_probability": 1.5})
+    with pytest.raises(ValueError, match="within"):
+        environment.reset(seed=0, options={"destination_start_fraction": -0.1})
     environment.close()
+
+
+@pytest.mark.parametrize("task", ["T2", "T3", "T4"])
+def test_destination_start_holds_the_cube_above_the_path_to_the_destination(
+    task: str,
+) -> None:
+    """Destination-side starts sit on the cube-to-destination segment, above it."""
+    normal = PickPlaceEnv(task, "L1", "state")
+    started = PickPlaceEnv(task, "L1", "state")
+    normal_observation, _ = normal.reset(seed=12)
+    observation, info = started.reset(
+        seed=12,
+        options={"grasped_start_probability": 1.0, "destination_start_fraction": 1.0},
+    )
+    name = observation["target_object"]
+    assert info["start_grasped"] is True
+    assert is_grasped(started.model, started.data, name)
+
+    origin = normal_observation["object_poses"][name]["position"][:2]
+    destination = observation["target_pose"][:3]
+    cube = observation["object_poses"][name]["position"]
+    segment = destination[:2] - origin
+    progress = float(np.dot(cube[:2] - origin, segment) / np.dot(segment, segment))
+    offset = cube[:2] - (origin + np.clip(progress, 0.0, 1.0) * segment)
+    assert -0.02 <= progress <= 1.02
+    assert np.linalg.norm(offset) <= 0.01
+    low, high = pick_place_env.DESTINATION_START_HEIGHT
+    assert destination[2] + low - 0.01 <= cube[2] <= destination[2] + high + 0.01
+    normal.close()
+    started.close()
+
+
+def test_zero_destination_start_fraction_leaves_resets_unchanged() -> None:
+    """The opt-in default draws no extra randomness, keeping existing runs identical."""
+    default = PickPlaceEnv("T2", "L1", "state")
+    explicit = PickPlaceEnv("T2", "L1", "state")
+    for seed in range(4):
+        first, _ = default.reset(seed=seed, options={"grasped_start_probability": 0.5})
+        second, _ = explicit.reset(
+            seed=seed,
+            options={
+                "grasped_start_probability": 0.5,
+                "destination_start_fraction": 0.0,
+            },
+        )
+        _assert_tree_equal(first, second)
+    default.close()
+    explicit.close()
 
 
 def test_different_l1_seeds_sample_different_scene_poses() -> None:
