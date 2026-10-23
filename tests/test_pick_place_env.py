@@ -34,6 +34,16 @@ def test_environment_passes_gymnasium_checker() -> None:
     environment.close()
 
 
+def test_success_reports_the_current_predicate_without_a_hold_timer() -> None:
+    """Expose immediate task success separately from the one-second termination hold."""
+    environment = PickPlaceEnv("T1", "L0", "state")
+    environment.reset(seed=42)
+
+    assert environment.success() is False
+
+    environment.close()
+
+
 def test_image_size_is_configurable_without_changing_the_default() -> None:
     """Keep policy observations at 128px while allowing 256px demo rendering."""
     default_environment = PickPlaceEnv("T2", "L1", "image")

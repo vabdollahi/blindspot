@@ -1,4 +1,6 @@
-.PHONY: setup test lint view-scene view-control view-expert view-bc view-rl evaluate baseline evaluate-bc report benchmark-scene benchmark-rl-env demos train-bc train-rl evaluate-rl
+.PHONY: setup test lint view-scene view-control view-expert view-bc view-rl evaluate baseline evaluate-bc report benchmark-scene benchmark-rl-env demos interaction interaction-coverage train-bc train-rl evaluate-rl
+
+INTERACTION_COVERAGE_ARGS ?= data/datasets/interaction-l1/collection.json
 
 ifeq ($(shell uname -s),Darwin)
 VIEWER_PYTHON := uv run mjpython
@@ -53,6 +55,12 @@ benchmark-rl-env:
 
 demos:
 	uv run --locked --extra imitation --extra rl python -m data.generate $(DEMO_ARGS)
+
+interaction:
+	uv run --locked --extra imitation --extra rl python -m data.interaction $(INTERACTION_ARGS)
+
+interaction-coverage:
+	uv run --locked python -m data.interaction --plot-coverage $(INTERACTION_COVERAGE_ARGS)
 
 train-bc:
 	uv run --locked --extra imitation python scripts/train_bc.py $(BC_ARGS)

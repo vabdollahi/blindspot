@@ -556,6 +556,10 @@ class PickPlaceEnv(gym.Env[dict[str, Any], np.ndarray]):
             return None
         return self._render_camera("front")
 
+    def success(self) -> bool:
+        """Return whether the current simulator state satisfies the task predicate."""
+        return self._success_predicate()
+
     def observe_images(self) -> dict[str, np.ndarray]:
         """Render the synchronized front and wrist RGB observations."""
         return {

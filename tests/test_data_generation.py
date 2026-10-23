@@ -9,6 +9,7 @@ from data.generate import (
     CollectionConfig,
     _default_dataset_name,
     _make_frame,
+    _publish_staged_dataset,
     _select_dataset_name,
     dataset_features,
     demo_noise_generator,
@@ -48,6 +49,22 @@ def test_automatic_dataset_names_avoid_overwriting_existing_runs(
             "t2-l1",
             automatic_versioning=False,
         )
+
+
+def test_dataset_publish_refuses_to_replace_existing_data(tmp_path: Path) -> None:
+    """Keep existing dataset contents intact if the final name is already taken."""
+    staging_root = tmp_path / ".staging"
+    final_root = tmp_path / "t2-l1"
+    staging_root.mkdir()
+    final_root.mkdir()
+    (staging_root / "new.json").write_text("new", encoding="utf-8")
+    (final_root / "existing.json").write_text("existing", encoding="utf-8")
+
+    with pytest.raises(FileExistsError, match="appeared during collection"):
+        _publish_staged_dataset(staging_root, final_root)
+
+    assert (final_root / "existing.json").read_text(encoding="utf-8") == "existing"
+    assert (staging_root / "new.json").read_text(encoding="utf-8") == "new"
 
 
 def test_default_dataset_names_are_compact_and_distinguish_t3l() -> None:

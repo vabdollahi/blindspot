@@ -149,9 +149,17 @@ def perturb_action(
     perturbed = clean_action.copy()
     perturbed[:3] += random.normal(0.0, position_std, size=3)
     perturbed[3] += random.normal(0.0, yaw_std)
+    return clip_action(perturbed)
+
+
+def clip_action(action: np.ndarray) -> np.ndarray:
+    """Validate and clip an absolute TCP command to the environment limits."""
+    command = np.asarray(action, dtype=np.float64)
+    if command.shape != (5,) or not np.all(np.isfinite(command)):
+        raise ValueError("Action must be a finite [x, y, z, yaw, g] vector")
     action_low = np.array([*WORKSPACE_LOWER, -np.pi / 2, 0.0])
     action_high = np.array([*WORKSPACE_UPPER, np.pi / 2, 1.0])
-    return np.clip(perturbed, action_low, action_high)
+    return np.clip(command, action_low, action_high)
 
 
 def maybe_perturb_action(
@@ -355,11 +363,7 @@ def _run_attempt(seed: int) -> EpisodeRollout:
             position_std=config.noise_position_std,
             yaw_std=float(np.deg2rad(config.noise_yaw_degrees)),
         )
-        executed_action = np.clip(
-            executed_action,
-            [*WORKSPACE_LOWER, -np.pi / 2, 0.0],
-            [*WORKSPACE_UPPER, np.pi / 2, 1.0],
-        )
+        executed_action = clip_action(executed_action)
         frames.append(
             _make_frame(
                 observation,
@@ -616,6 +620,13 @@ def _select_dataset_name(
         run_number += 1
 
 
+def _publish_staged_dataset(staging_root: Path, final_root: Path) -> None:
+    """Move a verified dataset into place without replacing existing data."""
+    if final_root.exists() or final_root.is_symlink():
+        raise FileExistsError(f"Dataset output appeared during collection: {final_root}")
+    staging_root.rename(final_root)
+
+
 def _checkpoint_digest(checkpoint_dir: Path) -> str:
     """Hash the model and normalization files used to reproduce an RL policy."""
     digest = hashlib.sha256()
@@ -790,7 +801,7 @@ def generate_dataset(
                 staging_root / split,
                 expected_episodes,
             )
-        os.replace(staging_root, final_root)
+        _publish_staged_dataset(staging_root, final_root)
         _LOGGER.info("Wrote LeRobot datasets to %s", final_root)
         return summary
     finally:

@@ -143,6 +143,24 @@ make demos DEMO_ARGS="--task T3-L --instruction-template-split held-out"
 
 Each policy step has a 1% chance of receiving a Gaussian perturbation (1 cm xyz, 3 degrees yaw); the clean expert action remains the label, and the applied action is stored separately. To run the open-loop replay check, set both noise standard deviations to zero and pass `--verify-open-loop`.
 
+## World-model interaction corpus
+
+Collect the 2,000-episode T1-T3 L1 corpus from frozen RL experts, the same experts with large action noise, intermediate PPO checkpoints, and scripted exploration:
+
+```sh
+make interaction
+```
+
+The collector keeps every episode, including failures, and saves the executed action, the next-state success predicate, simulator object poses, and a source ID for every transition. Scripted exploration targets are checked with Mink IK before they are used. The `interaction-l1/collection.json` manifest records per-source and per-task counts, checkpoint hashes, failures, and workspace/yaw/gripper action-coverage histograms. It also writes `action-coverage.png` with XY, XZ, and YZ occupancy projections plus yaw and gripper histograms. Defaults for the noisy source are 5 cm position noise and 15° yaw noise per step.
+
+Regenerate the coverage plot from an existing manifest without collecting episodes again:
+
+```sh
+make interaction-coverage
+```
+
+For another corpus or output path, pass `INTERACTION_COVERAGE_ARGS="PATH/collection.json --plot-output PATH/action-coverage.png"`.
+
 Train a behavior-cloning baseline from a generated dataset (MPS is selected automatically when available):
 
 ```sh
