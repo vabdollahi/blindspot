@@ -11,14 +11,14 @@
 
 ## Project
 
-- Simulated Franka Panda (MuJoCo) following natural-language pick-and-place instructions. Layers: environment + scripted expert → imitation learning (BC, ACT, Diffusion Policy) → VLA (SmolVLA) → RL (PPO, residual PPO) → LLM/VLM agent.
-- Sources of truth: `docs/roadmap.md` (build steps, decisions, tasks, evaluation rules), `docs/idea.md` (design rationale), `docs/decisions.md` (decision log), `docs/conventions.md` (frames and units).
+- Simulated Franka Panda (MuJoCo) as a testbed for robot foundation models. Layers: environment + scripted expert → RL expert (PPO) → data engine → VLA (SmolVLA) → representations (DINOv2, V-JEPA 2, in-domain JEPA) → latent world models (uncertainty, planning, policy evaluation) → distillation and efficient inference → compact LLM agent.
+- Sources of truth: `docs/roadmap.md` (build steps, decisions, tasks, evaluation rules), `docs/idea.md` (design rationale), `docs/decisions.md` (design rationale), `docs/conventions.md` (frames and units).
 - Out of scope: custom kinematics, dynamics, or controllers. Motion is `mink` IK plus MuJoCo position servos.
 
 ## Stack
 
 - Python 3.12 with `uv` only (never `pip`); `uv.lock` is committed.
-- `mujoco` 3.x, MuJoCo Menagerie as a pinned submodule in `third_party/`, `mink`, `gymnasium`, `stable-baselines3`, PyTorch (MPS), `lerobot` (pinned), `pydantic`, `openai` client for OpenAI-compatible model servers.
+- `mujoco` 3.x, MuJoCo Menagerie as a pinned submodule in `third_party/`, `mink`, `gymnasium`, `stable-baselines3`, PyTorch (MPS), `lerobot` (pinned), `transformers` (pinned, pretrained encoders), `onnxruntime`, `pydantic`, `openai` client for OpenAI-compatible model servers.
 - Model servers (Ollama, LM Studio, `mlx-lm`/`mlx-vlm`) run in a separate environment and are reached only over HTTP. Never import them into the simulation/training environment.
 
 ## Conventions (must hold everywhere)

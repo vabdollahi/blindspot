@@ -1,6 +1,6 @@
-# Decision Log
+# Design decisions
 
-The initial decisions below are fixed in [the roadmap](roadmap.md#3-fixed-design-decisions). Changes to them require updating the roadmap, this log, and [the project rationale](idea.md) together.
+The choices below define the current implementation. The [roadmap](roadmap.md) is the source of truth for project scope, build phases, tasks, and evaluation rules; this document records the rationale for the current design.
 
 | Topic | Decision | Rationale |
 | --- | --- | --- |
@@ -13,8 +13,7 @@ The initial decisions below are fixed in [the roadmap](roadmap.md#3-fixed-design
 | Learned-policy action | Absolute base-frame TCP target `[x, y, z, yaw, g]`, top-down gripper, `g` in [0, 1] | One compact action representation is shared across learned methods. |
 | Action limits | Clip xyz to the workspace and yaw to [−π/2, π/2] | Constrains commands to the intended operating region. |
 | Phase 1b RL policy action | Deltas from the controller's TCP target (xyz ≤ 1.25 cm, yaw ≤ 0.05 rad), binary gripper, integrated into the absolute action | Makes holding still and fine positioning closed-loop and keeps exploration local; the frozen policy emits absolute actions through the same tracker. |
-| Residual-RL action | Expert-relative deltas bounded to ±2 cm and ±10° | Limits the learned correction around the scripted expert. |
-| Image observations | Front and wrist RGB images, 128 × 128 uint8 | Provides consistent camera keys and a compact image size. |
+| Image observations | Front and wrist RGB images, uint8, 256 × 256 for every dataset from Phase 2 on (the existing BC baselines use 128 × 128) | Matches the input resolution of SmolVLA and the pretrained encoders, and keeps the 4 cm cubes several pixels wide in the front view. |
 | State observation | 7 joint positions, gripper width, 3-D TCP position, TCP yaw | Defines a compact, shared proprioceptive state. |
 | Units | SI units and radians | Avoids unit conversions between simulation, policies, and evaluation. |
 | Frames | `world`, `base`, `ee`, `cam_front`, `cam_wrist` | Gives transforms and observations explicit frame names. |
@@ -23,43 +22,25 @@ The initial decisions below are fixed in [the roadmap](roadmap.md#3-fixed-design
 | Camera axes | Convert MuJoCo OpenGL camera axes to OpenCV axes for pinhole projection | Keeps camera projection formulas consistent with their expected axes. |
 | Seed ranges | Train 0-99,999; validation 100,000-109,999; evaluation 1,000,000-1,009,999 | Keeps evaluation seeds separate from training and tuning. |
 | Randomness | Spawn named independent generators from one `SeedSequence` | Makes random streams reproducible and separates purposes such as scene, noise, and policy. |
-| Arm position-servo stiffness | Multiply the Panda arm actuators' position gain and position-feedback bias by 5; preserve actuator type and velocity damping. | Reduces gravity-induced TCP tracking error enough to meet the 2 mm held-target tolerance while retaining the Menagerie position-target interface. |
-| Grasp contact settings | Use 50 g cubes and friction `[2.0, 0.005, 0.0001]` on cubes and fingertip pads; keep `impratio=10` and `solref=[0.02, 1.0]`. | Passed the Phase 1.3 grasp, 8 cm lift, and 3 s hold checks on 20 seeded cube poses with less than 5 mm of slip. |
+| Arm position-servo stiffness | Multiply the Panda arm actuators' position gain and position-feedback bias by 5; preserve actuator type and velocity damping. | Reduces gravity-induced TCP tracking error while retaining the Menagerie position-target interface. |
+| Grasp contact settings | Use 50 g cubes and friction `[2.0, 0.005, 0.0001]` on cubes and fingertip pads; keep `impratio=10` and `solref=[0.02, 1.0]`. | Provides stable contacts for grasping, lifting, and holding the cube. |
 
-## Throughput baseline
+## RL expert and dataset design
 
-Measured on 2026-10-14 with `make benchmark-scene`: macOS 26.6.2, Apple M3 Max, 36 GB memory, Python 3.12.4, and MuJoCo 3.16.0. The benchmark timed 10,000 physics steps after 1,000 warm-up steps and 500 `Renderer` update/render frames per camera after 20 warm-up frames, at 128 × 128.
+- Train one pure-PPO policy from scratch per non-language task (T1-T4) on privileged state. A task's best qualifying checkpoint is the primary demonstrator for Phase 2 datasets and the privileged teacher for distillation.
+- Keep the scripted expert in the benchmark as a comparison baseline and as a fallback demonstrator for any task whose RL checkpoint does not meet its target.
+- Generate T3-L demonstrations with the T3 expert targeting the instructed cube. T1 has no object and uses its checkpoint to establish parity with the scripted baseline.
 
-| Measurement | Throughput |
-| --- | ---: |
-| Physics | 33,916.4 steps/s |
-| Front camera | 119.5 frames/s |
-| Wrist camera | 108.7 frames/s |
-
-These local throughput figures are a reference, not a performance gate; they vary with hardware, graphics drivers, and system load. Re-run `make benchmark-scene` to update them.
-
-## Roadmap reordering: an RL expert before imitation learning (2026-10-16)
-
-After Phase 1 (scripted expert) and Phase 2.2 (state and image BC), the scripted expert fell short of its Phase 1 targets on T3 and T4, and BC trained on its demonstrations inherited that ceiling. Rather than continue hand-tuning the scripted state machine, a **Phase 1b** was inserted between Phase 1 and Phase 2a:
-
-- **Pure PPO, not residual PPO,** is trained from scratch per task, so the result does not inherit the scripted expert's failure modes; a residual policy is bounded by the quality of its base policy.
-- The frozen, best-performing checkpoint per task becomes the demonstrator for Phase 2a (BC, ACT, Diffusion Policy) and Phase 2b (SmolVLA). The scripted expert remains in the code and in the final benchmark as a baseline, but no longer generates training data.
-- The existing T2-L1 scripted-expert demonstrations and BC checkpoints are kept as a historical baseline.
-- Phase 3 now covers residual RL refining the Phase 1b RL expert under perturbed dynamics (T2-H). Its headroom calibration (3.1) and `ResidualWrapper` base policy reference the RL expert, so T2-H's perturbation magnitudes will need recalibrating against the stronger base policy.
-- **Scope:** Phase 1b covers every non-language task (T1, T2, T3, T4). T3-L and T5 need language conditioning and continue to use the scripted expert. T1 has no object, so its observation and reward reduce to reaching the target; its checkpoint only establishes parity with the scripted baseline and is not used for demonstrations.
-
-`docs/roadmap.md` and `docs/idea.md` were updated together; the roadmap's Phase 1b section lists the build, evaluation, and freeze steps.
-
-## Phase 1b training and evaluation tooling (`policies/rl.py`, `scripts/train_rl.py`, `scripts/evaluate_rl.py`, 2026-10-20)
+## RL training, checkpointing, and evaluation
 
 - **Checkpoint selection by success rate.** A training callback evaluates the deterministic policy on fixed validation seeds every `eval_freq` steps and keeps a `best/` snapshot. It scores the task's own success predicate, including its hold time, rather than the mean return that SB3's `EvalCallback` reports.
 - **Reproducible checkpoints.** Each run directory holds `model.zip`, the `VecNormalize` statistics, and `run.json` (config, git commit, seeds, hardware, learning curve), mirroring the BC layout. Storing the normalization statistics with every checkpoint reproduces the exact observation normalization at evaluation time.
 - **Resuming.** A resumed run keeps the checkpoint's hyperparameters, counts `total_timesteps` as additional steps, preserves its evaluation cadence, and writes to a new directory that records its source checkpoint.
 - **Shared evaluation.** `RLPolicy` exposes a checkpoint through the `Policy` protocol, so RL experts are evaluated by the same harness and reported in the same format as the scripted expert and BC.
 
-## Phase 1b RL environment design (`envs/rl_env.py`, 2026-10-22)
+## RL environment specification
 
-`PickPlaceRLEnv` wraps `PickPlaceEnv` for the non-language tasks and defines the action parameterization, observation, reward, and training curriculum shared by every Phase 1b policy. Roadmap §3, 1b.1, and 1b.2, `docs/idea.md`, and `docs/conventions.md` reflect these decisions.
+`PickPlaceRLEnv` wraps `PickPlaceEnv` for the non-language tasks and defines the action parameterization, observation, reward, and training curriculum shared by every RL policy.
 
 | Area | Decision | Rationale |
 | --- | --- | --- |

@@ -1,6 +1,6 @@
 # Blindspot
 
-A simulated Franka Panda arm that follows natural-language pick-and-place instructions. The project builds from a MuJoCo scene and scripted expert through imitation learning, vision-language-action models, reinforcement learning, and an LLM/VLM agent. See [the project idea](docs/idea.md) and [the roadmap](docs/roadmap.md).
+A simulated Franka Panda arm used as a testbed for robot foundation models. A MuJoCo scene, a scripted expert, and a reinforcement-learning expert provide data and baselines for a fine-tuned vision-language-action model (SmolVLA), JEPA representations, latent world models with calibrated uncertainty, and distilled policies, all benchmarked on the same tasks and seeds. See [the project idea](docs/idea.md) and [the roadmap](docs/roadmap.md).
 
 ## Setup
 
@@ -46,13 +46,13 @@ By default, the report is written to `eval/results/report.md` and `eval/results/
 
 ## Reinforcement learning (Phase 1b)
 
-Phase 1b trains a pure-PPO policy for each non-language task (T1-T4) from scratch, with no dependency on the scripted expert. Once a task's checkpoint qualifies, it replaces the scripted expert as the demonstrator for imitation learning (see [the roadmap](docs/roadmap.md)).
+Phase 1b trains a pure-PPO policy for each non-language task (T1-T4) from scratch, with no dependency on the scripted expert. Once a task's checkpoint qualifies, it replaces the scripted expert as the demonstrator for the learned models and serves as the privileged teacher for distillation (see [the roadmap](docs/roadmap.md)).
 
 - **Action:** bounded deltas from the controller's TCP target and a binary gripper. A shared command tracker integrates them into the absolute `[x, y, z, yaw, g]` action, so a frozen checkpoint is a drop-in `Policy` like any other.
 - **Reward:** staged and non-positive per step (reach → grasp → carry → place → open), plus a success bonus.
 - **Curriculum:** by default, 30% of object-task training episodes start with the cube already grasped. `--destination-start-fraction` optionally starts some of those partway along the path to the destination, which long carries such as T3's need.
 
-The [decision log](docs/decisions.md#phase-1b-rl-environment-design-envsrl_envpy-2026-10-22) explains these choices.
+The [design decisions](docs/decisions.md#rl-environment-specification) explain these choices.
 
 ![Pure-PPO policy placing the red cube in the target zone (T2-L1, evaluation seed 1,000,030)](docs/media/t2-l1-pure-ppo.gif)
 
