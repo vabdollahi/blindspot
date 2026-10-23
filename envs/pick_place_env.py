@@ -71,6 +71,7 @@ class TaskDefinition(BaseModel):
     default_target: tuple[float, float, float] | None = None
     cube_count: tuple[int, int] | None = None
     instruction_templates: list[str] = Field(default_factory=list)
+    held_out_instruction_templates: list[str] = Field(default_factory=list)
     goal_sequence: list[GoalDefinition] = Field(default_factory=list)
 
 
@@ -127,6 +128,30 @@ def _load_task_configs() -> tuple[
     return task_config.tasks, level_config.levels
 
 
+def get_instruction_templates(
+    task: str,
+    split: Literal["train", "held-out", "all"] = "all",
+) -> tuple[str, ...]:
+    """Return the configured instruction templates for a task and data split."""
+    normalized_task = task.strip().upper().replace("_", "-")
+    if normalized_task == "T3L":
+        normalized_task = "T3-L"
+    if normalized_task not in _TASK_CONFIGS:
+        raise ValueError(f"Unsupported task {task!r}; choose from {tuple(_TASK_CONFIGS)}")
+
+    definition = _TASK_CONFIGS[normalized_task]
+    if split == "train":
+        return tuple(definition.instruction_templates)
+    if split == "held-out":
+        return tuple(definition.held_out_instruction_templates)
+    if split == "all":
+        return (
+            *definition.instruction_templates,
+            *definition.held_out_instruction_templates,
+        )
+    raise ValueError(f"Unsupported instruction template split {split!r}")
+
+
 def _load_yaml(path: Path) -> dict[str, Any]:
     """Parse one YAML file and require a mapping at its root."""
     value = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -153,6 +178,7 @@ class PickPlaceEnv(gym.Env[dict[str, Any], np.ndarray]):
         obs_mode: str = "state",
         *,
         render_mode: str | None = None,
+        image_size: int = OBSERVATION_SIZE,
     ) -> None:
         """Build the MuJoCo scene, controller, spaces, and validated config."""
         super().__init__()
@@ -169,11 +195,14 @@ class PickPlaceEnv(gym.Env[dict[str, Any], np.ndarray]):
             raise ValueError("obs_mode must be 'state' or 'image'")
         if render_mode not in {None, "rgb_array"}:
             raise ValueError("render_mode must be None or 'rgb_array'")
+        if image_size < 1:
+            raise ValueError("image_size must be positive")
 
         self.task = normalized_task
         self.level = level
         self.obs_mode = obs_mode
         self.render_mode = render_mode
+        self.image_size = image_size
         self._task_config = _TASK_CONFIGS[self.task]
         self._episode_time_limit_steps = round(
             self._task_config.time_limit / ENVIRONMENT_TIMESTEP
@@ -326,7 +355,7 @@ class PickPlaceEnv(gym.Env[dict[str, Any], np.ndarray]):
             image_space = spaces.Box(
                 low=0,
                 high=255,
-                shape=(OBSERVATION_SIZE, OBSERVATION_SIZE, 3),
+                shape=(self.image_size, self.image_size, 3),
                 dtype=np.uint8,
             )
             observation_spaces.update(
@@ -377,7 +406,12 @@ class PickPlaceEnv(gym.Env[dict[str, Any], np.ndarray]):
         self._restore_model()
         mujoco.mj_resetData(self.model, self.data)
         self._initialize_robot()
-        self._sample_episode()
+        instruction_template = (options or {}).get("instruction_template")
+        if instruction_template is not None and not isinstance(
+            instruction_template, str
+        ):
+            raise TypeError("instruction_template must be a string")
+        self._sample_episode(instruction_template=instruction_template)
         self._apply_level_randomization()
         qpos = self.data.qpos.copy()
         qvel = self.data.qvel.copy()
@@ -562,10 +596,12 @@ class PickPlaceEnv(gym.Env[dict[str, Any], np.ndarray]):
                 joint_id, 1
             ]
 
-    def _sample_episode(self) -> None:
+    def _sample_episode(self, *, instruction_template: str | None = None) -> None:
         """Sample active objects, target pose, and task instruction."""
         if self._rng_scene is None:
             raise RuntimeError("reset must initialize the scene random generator")
+        if instruction_template is not None and self.task != "T3-L":
+            raise ValueError("instruction_template is only supported for T3-L")
         random = self._rng_scene
         l0 = self.level == "L0"
         self._instruction = ""
@@ -601,6 +637,10 @@ class PickPlaceEnv(gym.Env[dict[str, Any], np.ndarray]):
             self._active_cube_names = (f"cube_{color}",)
             self._target_object = f"cube_{color}"
         elif self.task == "T3-L":
+            if instruction_template is not None and instruction_template not in (
+                get_instruction_templates("T3-L")
+            ):
+                raise ValueError("instruction_template is not configured for T3-L")
             if l0:
                 colors = ["blue", "red"]
             else:
@@ -613,10 +653,9 @@ class PickPlaceEnv(gym.Env[dict[str, Any], np.ndarray]):
             self._active_cube_names = tuple(f"cube_{color}" for color in colors)
             named_color = "red" if l0 else str(random.choice(colors))
             self._target_object = f"cube_{named_color}"
-            template = (
-                self._task_config.instruction_templates[0]
-                if l0
-                else str(random.choice(self._task_config.instruction_templates))
+            templates = get_instruction_templates("T3-L")
+            template = instruction_template or (
+                templates[0] if l0 else str(random.choice(templates))
             )
             self._instruction = template.format(color=named_color)
         elif self.task == "T4":
@@ -965,12 +1004,12 @@ class PickPlaceEnv(gym.Env[dict[str, Any], np.ndarray]):
         return observation
 
     def _render_camera(self, camera_name: str) -> np.ndarray:
-        """Render one named camera at the shared 128 by 128 resolution."""
+        """Render one named camera at this environment's configured resolution."""
         if self._renderer is None:
             self._renderer = mujoco.Renderer(
                 self.model,
-                height=OBSERVATION_SIZE,
-                width=OBSERVATION_SIZE,
+                height=self.image_size,
+                width=self.image_size,
             )
         self._renderer.update_scene(self.data, camera=camera_name)
         return np.asarray(self._renderer.render(), dtype=np.uint8).copy()

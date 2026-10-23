@@ -126,19 +126,28 @@ make view-rl RL_VIEW_ARGS="--checkpoint-dir checkpoints/rl/t2-l1/seed-0/best --t
 
 ## Demonstrations
 
-Install the optional pinned LeRobot dataset dependency and generate 400 successful T2-L1 and T3-L1 demonstrations (380 training episodes and 20 validation episodes per task):
+Generate 400 successful T2-L1 and T3-L1 demonstrations with the matching frozen PPO checkpoints (380 training episodes and 20 validation episodes per task):
 
 ```sh
 make demos
 ```
 
-Use `DEMO_ARGS="--task T2 --episodes 10 --workers 2"` for a smaller collection. Outputs are LeRobot datasets under `data/datasets/<task>-l1/{train,validation}/`; the collection manifest records episode seeds, discard rates, target-object counts, and the noise event rate. Existing default datasets are preserved; reruns automatically use names such as `t2-l1-run-02`. An explicit `--dataset-name` that already exists remains an error. Each policy step has a 1% chance of receiving a Gaussian perturbation (1 cm xyz, 3 degrees yaw); the clean expert action remains the label. This sparse schedule preserves successful collection while exposing recovery examples. To run the open-loop replay check, set both noise standard deviations to zero and pass `--verify-open-loop`.
+The generator uses `checkpoints/rl/t2-l1/seed-0/best` and `checkpoints/rl/t3-l1/seed-0/best` by default. Use `DEMO_ARGS="--task T2 --episodes 10 --workers 2"` for a smaller collection, or `--policy-source scripted` to explicitly collect a scripted-expert baseline. New LeRobot datasets use 256×256 RGB, retain both the clean `action` and applied `action.executed`, and store simulator object poses in `observation.environment_state`; `collection.json` records seeds, discard rates, task-label counts, the policy checkpoint path, and its SHA-256 digest. Default names are `t2-l1`, `t3-l1`, and `t3l-l1` (T3-L). Existing datasets are preserved and reruns automatically use versioned names such as `t2-l1-run-02`.
+
+Generate the language-conditioned T3-L dataset using the T3 PPO checkpoint and the training paraphrase set, then generate a separate held-out paraphrase dataset:
+
+```sh
+make demos DEMO_ARGS="--task T3-L"
+make demos DEMO_ARGS="--task T3-L --instruction-template-split held-out"
+```
+
+Each policy step has a 1% chance of receiving a Gaussian perturbation (1 cm xyz, 3 degrees yaw); the clean expert action remains the label, and the applied action is stored separately. To run the open-loop replay check, set both noise standard deviations to zero and pass `--verify-open-loop`.
 
 Train a behavior-cloning baseline from a generated dataset (MPS is selected automatically when available):
 
 ```sh
-make train-bc BC_ARGS="--dataset-name t2-l1-run-02 --policy state"
-make train-bc BC_ARGS="--dataset-name t2-l1-run-02 --policy image"
+make train-bc BC_ARGS="--dataset-name t2-l1 --policy state"
+make train-bc BC_ARGS="--dataset-name t2-l1 --policy image"
 ```
 
 Checkpoints and `run.json` records are written under `checkpoints/bc/<dataset>/<policy>/`. Default reruns use numbered directories such as `state-run-02`, preserving earlier checkpoints. An explicit `--output-dir` that already exists remains an error. State BC uses the 12-D proprioception, 28-D oracle object poses, and 4-D target pose. Image BC uses both 128 px cameras with ImageNet-pretrained, frozen ResNet-18 encoders and the 12-D proprioception. The camera embeddings are cached once per train/validation split; only the small fusion/action head is optimized. `train-bc` displays cache, batch, and epoch progress bars in interactive terminals.

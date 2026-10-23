@@ -1,9 +1,10 @@
-"""Collect scripted-expert demonstrations into LeRobot datasets."""
+"""Collect scripted or PPO expert demonstrations into LeRobot datasets."""
 
 from __future__ import annotations
 
 import argparse
 import atexit
+import hashlib
 import json
 import logging
 import multiprocessing
@@ -19,11 +20,18 @@ import numpy as np
 from pydantic import BaseModel, ConfigDict, Field
 
 from common.seeding import named_generators
-from envs.pick_place_env import CUBE_COLORS, PickPlaceEnv
+from envs.pick_place_env import (
+    CUBE_COLORS,
+    PickPlaceEnv,
+    get_instruction_templates,
+)
+from eval.policy import Policy
 from motion.control import ENVIRONMENT_TIMESTEP, WORKSPACE_LOWER, WORKSPACE_UPPER
 from skills.expert import ScriptedExpert
 
 DATASET_FPS = round(1.0 / ENVIRONMENT_TIMESTEP)
+DATASET_IMAGE_SIZE = 256
+DATASET_SCHEMA_VERSION = 2
 TRAIN_SEED_START = 0
 TRAIN_SEED_STOP = 100_000
 VALIDATION_SEED_START = 100_000
@@ -32,7 +40,7 @@ OBJECT_POSE_NAMES = ("cube_red", "cube_blue", "cube_green", "bowl")
 OBJECT_POSE_COMPONENTS = ("x", "y", "z", "qw", "qx", "qy", "qz")
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _WORKER_ENVIRONMENT: PickPlaceEnv | None = None
-_WORKER_EXPERT: ScriptedExpert | None = None
+_WORKER_POLICY: Policy | None = None
 _WORKER_CONFIG: CollectionConfig | None = None
 _LOGGER = logging.getLogger(__name__)
 
@@ -42,7 +50,10 @@ class CollectionConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    task: Literal["T2", "T3"]
+    task: Literal["T2", "T3", "T3-L"]
+    policy_source: Literal["rl", "scripted"] = "rl"
+    checkpoint_dir: Path | None = None
+    instruction_template_split: Literal["train", "held-out"] = "train"
     episodes: int = Field(default=400, ge=2)
     validation_fraction: float = Field(
         default=0.05, gt=0.0, lt=1.0, allow_inf_nan=False
@@ -63,6 +74,7 @@ class EpisodeRollout(BaseModel):
     seed: int
     success: bool
     target_object: str
+    task_label: str
     failure_reason: str | None = None
     frame_count: int
     frames: list[dict[str, Any]] = Field(default_factory=list)
@@ -79,6 +91,7 @@ class SplitSummary(BaseModel):
     seeds: list[int]
     failure_breakdown: dict[str, int]
     target_object_counts: dict[str, int]
+    task_label_counts: dict[str, int]
     open_loop_successes: int | None = None
     open_loop_rate: float | None = None
 
@@ -88,8 +101,14 @@ class CollectionSummary(BaseModel):
 
     dataset: str
     task: str
+    schema_version: int = DATASET_SCHEMA_VERSION
     level: str = "L1"
+    policy_source: Literal["rl", "scripted"]
+    checkpoint_dir: str | None = None
+    checkpoint_sha256: str | None = None
+    instruction_template_split: Literal["train", "held-out"] | None = None
     fps: int = DATASET_FPS
+    image_size: int = DATASET_IMAGE_SIZE
     total_episodes: int
     train: SplitSummary
     validation: SplitSummary
@@ -157,8 +176,16 @@ def maybe_perturb_action(
     )
 
 
-def episode_task(task: str, target_object: str) -> str:
+def episode_task(
+    task: str,
+    target_object: str,
+    instruction: str | None = None,
+) -> str:
     """Build the natural-language task label stored by LeRobot."""
+    if task == "T3-L":
+        if instruction is None or not instruction.strip():
+            raise ValueError("T3-L requires a non-empty language instruction")
+        return instruction
     color = target_object.removeprefix("cube_")
     if color not in CUBE_COLORS:
         raise ValueError(f"Unsupported target cube {target_object!r}")
@@ -178,12 +205,12 @@ def dataset_features() -> dict[str, dict[str, Any]]:
     return {
         "observation.images.front": {
             "dtype": "video",
-            "shape": (3, 128, 128),
+            "shape": (3, DATASET_IMAGE_SIZE, DATASET_IMAGE_SIZE),
             "names": ["channels", "height", "width"],
         },
         "observation.images.wrist": {
             "dtype": "video",
-            "shape": (3, 128, 128),
+            "shape": (3, DATASET_IMAGE_SIZE, DATASET_IMAGE_SIZE),
             "names": ["channels", "height", "width"],
         },
         "observation.state": {
@@ -192,6 +219,11 @@ def dataset_features() -> dict[str, dict[str, Any]]:
             "names": state_names,
         },
         "observation.object_poses": {
+            "dtype": "float32",
+            "shape": (len(OBJECT_POSE_NAMES) * len(OBJECT_POSE_COMPONENTS),),
+            "names": object_pose_names,
+        },
+        "observation.environment_state": {
             "dtype": "float32",
             "shape": (len(OBJECT_POSE_NAMES) * len(OBJECT_POSE_COMPONENTS),),
             "names": object_pose_names,
@@ -206,6 +238,11 @@ def dataset_features() -> dict[str, dict[str, Any]]:
             "shape": (5,),
             "names": ["x", "y", "z", "yaw", "gripper_open"],
         },
+        "action.executed": {
+            "dtype": "float32",
+            "shape": (5,),
+            "names": ["x", "y", "z", "yaw", "gripper_open"],
+        },
     }
 
 
@@ -213,6 +250,7 @@ def _make_frame(
     observation: dict[str, Any],
     images: dict[str, np.ndarray],
     action: np.ndarray,
+    executed_action: np.ndarray,
     task_label: str,
 ) -> dict[str, Any]:
     object_poses = observation["object_poses"]
@@ -233,25 +271,35 @@ def _make_frame(
             observation["observation.state"], dtype=np.float32
         ),
         "observation.object_poses": flattened_poses,
+        "observation.environment_state": flattened_poses.copy(),
         "observation.target_pose": np.asarray(
             observation["target_pose"], dtype=np.float32
         ),
         "action": np.asarray(action, dtype=np.float32),
+        "action.executed": np.asarray(executed_action, dtype=np.float32),
         "task": task_label,
     }
 
 
 def _initialize_worker(config_data: dict[str, Any]) -> None:
-    """Create one state environment, renderer, and expert in each worker."""
-    global _WORKER_CONFIG, _WORKER_ENVIRONMENT, _WORKER_EXPERT
+    """Create one state environment, renderer, and policy in each worker."""
+    global _WORKER_CONFIG, _WORKER_ENVIRONMENT, _WORKER_POLICY
     _WORKER_CONFIG = CollectionConfig.model_validate(config_data)
     _WORKER_ENVIRONMENT = PickPlaceEnv(
         _WORKER_CONFIG.task,
         "L1",
         "state",
         render_mode="rgb_array",
+        image_size=DATASET_IMAGE_SIZE,
     )
-    _WORKER_EXPERT = ScriptedExpert(_WORKER_CONFIG.task)
+    if _WORKER_CONFIG.policy_source == "scripted":
+        _WORKER_POLICY = ScriptedExpert(_WORKER_CONFIG.task)
+    else:
+        if _WORKER_CONFIG.checkpoint_dir is None:
+            raise ValueError("RL policy collection requires a checkpoint_dir")
+        from policies.rl import load_rl_policy
+
+        _WORKER_POLICY = load_rl_policy(_WORKER_CONFIG.checkpoint_dir)
     atexit.register(_close_worker)
 
 
@@ -263,16 +311,34 @@ def _close_worker() -> None:
 
 def _run_attempt(seed: int) -> EpisodeRollout:
     """Run one noisy expert episode and retain frames only when it succeeds."""
-    if _WORKER_CONFIG is None or _WORKER_ENVIRONMENT is None or _WORKER_EXPERT is None:
+    if _WORKER_CONFIG is None or _WORKER_ENVIRONMENT is None or _WORKER_POLICY is None:
         raise RuntimeError("Demo worker was not initialized")
 
     environment = _WORKER_ENVIRONMENT
-    expert = _WORKER_EXPERT
+    policy = _WORKER_POLICY
     config = _WORKER_CONFIG
-    observation, _ = environment.reset(seed=seed)
+    reset_options: dict[str, Any] = {}
+    if config.task == "T3-L":
+        templates = get_instruction_templates(
+            config.task, config.instruction_template_split
+        )
+        if not templates:
+            raise ValueError(
+                f"No {config.instruction_template_split} templates configured for T3-L"
+            )
+        reset_options["instruction_template"] = templates[seed % len(templates)]
+    observation, _ = environment.reset(
+        seed=seed,
+        options=reset_options or None,
+    )
     instruction = observation.get("instruction")
-    expert.reset(instruction if isinstance(instruction, str) else None)
+    policy.reset(instruction if isinstance(instruction, str) else None)
     target_object = str(observation["target_object"])
+    task_label = episode_task(
+        config.task,
+        target_object,
+        instruction if isinstance(instruction, str) else None,
+    )
     random = demo_noise_generator(seed)
     frames: list[dict[str, Any]] = []
     terminated = False
@@ -280,16 +346,28 @@ def _run_attempt(seed: int) -> EpisodeRollout:
     info: dict[str, Any] = {}
 
     while not terminated and not truncated:
-        clean_action = np.asarray(expert.act(observation), dtype=np.float64)
-        label = episode_task(config.task, target_object)
+        clean_action = np.asarray(policy.act(observation), dtype=np.float64)
         images = environment.observe_images()
-        frames.append(_make_frame(observation, images, clean_action, label))
         executed_action = maybe_perturb_action(
             clean_action,
             random,
             probability=config.noise_probability,
             position_std=config.noise_position_std,
             yaw_std=float(np.deg2rad(config.noise_yaw_degrees)),
+        )
+        executed_action = np.clip(
+            executed_action,
+            [*WORKSPACE_LOWER, -np.pi / 2, 0.0],
+            [*WORKSPACE_UPPER, np.pi / 2, 1.0],
+        )
+        frames.append(
+            _make_frame(
+                observation,
+                images,
+                clean_action,
+                executed_action,
+                task_label,
+            )
         )
         observation, _, terminated, truncated, info = environment.step(executed_action)
 
@@ -301,6 +379,7 @@ def _run_attempt(seed: int) -> EpisodeRollout:
         seed=seed,
         success=success,
         target_object=target_object,
+        task_label=task_label,
         failure_reason=None if success else info.get("failure_reason"),
         frame_count=len(frames),
         frames=frames if success else [],
@@ -351,6 +430,7 @@ def _collect_split(
     successes: list[int] = []
     failures: dict[str, int] = {}
     target_object_counts: dict[str, int] = {}
+    task_label_counts: dict[str, int] = {}
     open_loop_successes = 0
     progress_interval = max(1, min(50, target_episodes // 10))
 
@@ -378,6 +458,9 @@ def _collect_split(
                 successes.append(rollout.seed)
                 target_object_counts[rollout.target_object] = (
                     target_object_counts.get(rollout.target_object, 0) + 1
+                )
+                task_label_counts[rollout.task_label] = (
+                    task_label_counts.get(rollout.task_label, 0) + 1
                 )
                 if rollout.open_loop_success is not None:
                     open_loop_successes += int(rollout.open_loop_success)
@@ -433,6 +516,7 @@ def _collect_split(
         seeds=successes,
         failure_breakdown=dict(sorted(failures.items())),
         target_object_counts=dict(sorted(target_object_counts.items())),
+        task_label_counts=dict(sorted(task_label_counts.items())),
         open_loop_successes=open_loop_successes if open_loop_trials else None,
         open_loop_rate=open_loop_rate,
     )
@@ -453,7 +537,8 @@ def _require_lerobot() -> Any:
         from lerobot.datasets.lerobot_dataset import LeRobotDataset
     except ImportError as error:
         raise RuntimeError(
-            "Demo generation requires LeRobot 0.6.1; run `uv sync --extra imitation`."
+            "Demo generation requires LeRobot 0.6.1; run "
+            "`uv sync --extra imitation --extra rl`."
         ) from error
     return LeRobotDataset
 
@@ -495,7 +580,11 @@ def _verify_dataset(
         for key in ("observation.images.front", "observation.images.wrist"):
             image = np.asarray(sample[key])
             shape = tuple(image.shape)
-            if shape not in {(3, 128, 128), (128, 128, 3)}:
+            expected_image_shapes = {
+                (3, DATASET_IMAGE_SIZE, DATASET_IMAGE_SIZE),
+                (DATASET_IMAGE_SIZE, DATASET_IMAGE_SIZE, 3),
+            }
+            if shape not in expected_image_shapes:
                 raise RuntimeError(f"Unexpected decoded image shape for {key}: {shape}")
             minimum_pixel_range = (
                 10.0 if np.issubdtype(image.dtype, np.integer) else 10.0 / 255.0
@@ -527,6 +616,31 @@ def _select_dataset_name(
         run_number += 1
 
 
+def _checkpoint_digest(checkpoint_dir: Path) -> str:
+    """Hash the model and normalization files used to reproduce an RL policy."""
+    digest = hashlib.sha256()
+    for filename in ("model.zip", "vecnormalize.pkl"):
+        path = checkpoint_dir / filename
+        if not path.is_file():
+            raise FileNotFoundError(f"Missing RL checkpoint file: {path}")
+        digest.update(filename.encode("utf-8"))
+        with path.open("rb") as checkpoint_file:
+            for chunk in iter(lambda: checkpoint_file.read(1024 * 1024), b""):
+                digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _default_dataset_name(config: CollectionConfig) -> str:
+    """Return a compact canonical name for a task and instruction split."""
+    task_name = "t3l" if config.task == "T3-L" else config.task.lower()
+    held_out_suffix = (
+        "-held-out"
+        if config.task == "T3-L" and config.instruction_template_split == "held-out"
+        else ""
+    )
+    return f"{task_name}-l1{held_out_suffix}"
+
+
 def generate_dataset(
     config: CollectionConfig,
     *,
@@ -538,9 +652,35 @@ def generate_dataset(
         config.noise_position_std != 0.0 or config.noise_yaw_degrees != 0.0
     ):
         raise ValueError("Open-loop verification requires both noise values to be zero")
+    if config.instruction_template_split == "held-out" and config.task != "T3-L":
+        raise ValueError("The held-out instruction split is only available for T3-L")
+    if config.task == "T3-L" and not get_instruction_templates(
+        "T3-L", config.instruction_template_split
+    ):
+        raise ValueError(
+            f"No {config.instruction_template_split} instruction templates configured"
+        )
+    if config.policy_source == "rl":
+        checkpoint_task = "T3" if config.task == "T3-L" else config.task
+        checkpoint_dir = (
+            config.checkpoint_dir
+            or _PROJECT_ROOT
+            / "checkpoints"
+            / "rl"
+            / f"{checkpoint_task.lower()}-l1"
+            / "seed-0"
+            / "best"
+        )
+        checkpoint_dir = checkpoint_dir.expanduser().resolve()
+        checkpoint_sha256 = _checkpoint_digest(checkpoint_dir)
+        config = config.model_copy(update={"checkpoint_dir": checkpoint_dir})
+    else:
+        if config.checkpoint_dir is not None:
+            raise ValueError("checkpoint_dir is only valid when policy_source='rl'")
+        checkpoint_sha256 = None
 
     dataset_class = _require_lerobot()
-    requested_name = dataset_name or f"{config.task.lower()}-l1"
+    requested_name = dataset_name or _default_dataset_name(config)
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", requested_name):
         raise ValueError(
             "dataset_name must contain lowercase letters, digits, or hyphens"
@@ -615,6 +755,16 @@ def generate_dataset(
         summary = CollectionSummary(
             dataset=normalized_name,
             task=config.task,
+            policy_source=config.policy_source,
+            checkpoint_dir=(
+                str(config.checkpoint_dir)
+                if config.checkpoint_dir is not None
+                else None
+            ),
+            checkpoint_sha256=checkpoint_sha256,
+            instruction_template_split=(
+                config.instruction_template_split if config.task == "T3-L" else None
+            ),
             total_episodes=config.episodes,
             train=train_summary,
             validation=validation_summary,
@@ -653,7 +803,16 @@ def generate_dataset(
 def _parse_args() -> argparse.Namespace:
     """Parse the demo-generation command line."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--task", choices=("T2", "T3", "all"), default="all")
+    parser.add_argument("--task", choices=("T2", "T3", "T3-L", "all"), default="all")
+    parser.add_argument(
+        "--policy-source", choices=("rl", "scripted"), default="rl"
+    )
+    parser.add_argument("--checkpoint-dir", type=Path)
+    parser.add_argument(
+        "--instruction-template-split",
+        choices=("train", "held-out"),
+        default="train",
+    )
     parser.add_argument("--episodes", type=int, default=400)
     parser.add_argument("--validation-fraction", type=float, default=0.05)
     parser.add_argument("--workers", type=int, default=min(8, os.cpu_count() or 1))
@@ -679,9 +838,14 @@ def main() -> None:
     tasks = ("T2", "T3") if arguments.task == "all" else (arguments.task,)
     if arguments.dataset_name is not None and len(tasks) > 1:
         raise ValueError("--dataset-name can only be used with one selected task")
+    if arguments.checkpoint_dir is not None and len(tasks) > 1:
+        raise ValueError("--checkpoint-dir can only be used with one selected task")
     for task in tasks:
         config = CollectionConfig(
             task=task,
+            policy_source=arguments.policy_source,
+            checkpoint_dir=arguments.checkpoint_dir,
+            instruction_template_split=arguments.instruction_template_split,
             episodes=arguments.episodes,
             validation_fraction=arguments.validation_fraction,
             workers=arguments.workers,

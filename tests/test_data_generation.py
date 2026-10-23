@@ -5,7 +5,10 @@ import pytest
 
 from common.seeding import named_generators
 from data.generate import (
+    DATASET_IMAGE_SIZE,
     CollectionConfig,
+    _default_dataset_name,
+    _make_frame,
     _select_dataset_name,
     dataset_features,
     demo_noise_generator,
@@ -45,6 +48,19 @@ def test_automatic_dataset_names_avoid_overwriting_existing_runs(
             "t2-l1",
             automatic_versioning=False,
         )
+
+
+def test_default_dataset_names_are_compact_and_distinguish_t3l() -> None:
+    """Keep the language task distinct without a duplicated L token."""
+    assert _default_dataset_name(CollectionConfig(task="T2")) == "t2-l1"
+    assert _default_dataset_name(CollectionConfig(task="T3")) == "t3-l1"
+    assert _default_dataset_name(CollectionConfig(task="T3-L")) == "t3l-l1"
+    assert (
+        _default_dataset_name(
+            CollectionConfig(task="T3-L", instruction_template_split="held-out")
+        )
+        == "t3l-l1-held-out"
+    )
 
 
 def test_clean_action_label_is_not_modified_by_dart_noise() -> None:
@@ -145,15 +161,64 @@ def test_training_seeds_produce_distinct_l1_demo_scenes(task: str) -> None:
 
 
 def test_demo_feature_schema_contains_visual_and_oracle_inputs() -> None:
-    """Keep both policy input modes and the five-dimensional action in the data."""
+    """Keep future-model inputs and executed actions in the LeRobot schema."""
     features = dataset_features()
 
-    assert features["observation.images.front"]["shape"] == (3, 128, 128)
-    assert features["observation.images.wrist"]["shape"] == (3, 128, 128)
+    assert features["observation.images.front"]["shape"] == (
+        3,
+        DATASET_IMAGE_SIZE,
+        DATASET_IMAGE_SIZE,
+    )
+    assert features["observation.images.wrist"]["shape"] == (
+        3,
+        DATASET_IMAGE_SIZE,
+        DATASET_IMAGE_SIZE,
+    )
     assert features["observation.state"]["shape"] == (12,)
     assert features["observation.object_poses"]["shape"] == (28,)
+    assert features["observation.environment_state"]["shape"] == (28,)
     assert features["observation.target_pose"]["shape"] == (4,)
     assert features["action"]["shape"] == (5,)
+    assert features["action.executed"]["shape"] == (5,)
+
+
+def test_frame_preserves_clean_and_executed_actions_and_environment_state() -> None:
+    """Label expert targets separately from actions applied to MuJoCo."""
+    observation = {
+        "observation.state": np.zeros(12, dtype=np.float32),
+        "target_pose": np.zeros(4, dtype=np.float32),
+        "object_poses": {
+            name: {
+                "position": np.array([index, 0.0, 0.0], dtype=np.float32),
+                "quaternion_wxyz": np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+            }
+            for index, name in enumerate(("cube_red", "cube_blue", "cube_green", "bowl"))
+        },
+    }
+    clean_action = np.array([0.4, 0.0, 0.3, 0.1, 0.0], dtype=np.float64)
+    executed_action = np.array([0.41, 0.0, 0.3, 0.1, 0.0], dtype=np.float64)
+    images = {
+        "observation.images.front": np.zeros(
+            (DATASET_IMAGE_SIZE, DATASET_IMAGE_SIZE, 3), dtype=np.uint8
+        ),
+        "observation.images.wrist": np.zeros(
+            (DATASET_IMAGE_SIZE, DATASET_IMAGE_SIZE, 3), dtype=np.uint8
+        ),
+    }
+
+    frame = _make_frame(
+        observation, images, clean_action, executed_action, "Place the red cube."
+    )
+
+    np.testing.assert_allclose(frame["action"], clean_action, rtol=1e-7)
+    np.testing.assert_allclose(
+        frame["action.executed"], executed_action, rtol=1e-7
+    )
+    np.testing.assert_array_equal(
+        frame["observation.environment_state"],
+        frame["observation.object_poses"],
+    )
+    assert frame["task"] == "Place the red cube."
 
 
 @pytest.mark.parametrize(
@@ -168,6 +233,12 @@ def test_episode_task_label_describes_the_expert_goal(
 ) -> None:
     """Use descriptive task strings instead of bare task IDs in LeRobot data."""
     assert episode_task(task, target) == expected
+
+
+def test_t3l_episode_task_uses_instruction_verbatim() -> None:
+    """Retain the sampled language instruction as the episode task label."""
+    instruction = "Move the blue cube into the bowl."
+    assert episode_task("T3-L", "cube_blue", instruction) == instruction
 
 
 def test_open_loop_verification_requires_noise_free_collection(

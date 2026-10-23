@@ -52,7 +52,7 @@ benchmark-rl-env:
 	uv run --locked --extra rl python scripts/benchmark_rl_env.py $(BENCHMARK_RL_ENV_ARGS)
 
 demos:
-	uv run --locked --extra imitation python -m data.generate $(DEMO_ARGS)
+	uv run --locked --extra imitation --extra rl python -m data.generate $(DEMO_ARGS)
 
 train-bc:
 	uv run --locked --extra imitation python scripts/train_bc.py $(BC_ARGS)

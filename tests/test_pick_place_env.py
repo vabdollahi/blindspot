@@ -5,7 +5,11 @@ from gymnasium.utils.env_checker import check_env
 
 from common.seeding import TRAIN_SEED_STOP
 from envs import pick_place_env
-from envs.pick_place_env import SUCCESS_HOLD_STEPS, PickPlaceEnv
+from envs.pick_place_env import (
+    SUCCESS_HOLD_STEPS,
+    PickPlaceEnv,
+    get_instruction_templates,
+)
 from skills.grasp_check import is_grasped
 
 
@@ -28,6 +32,26 @@ def test_environment_passes_gymnasium_checker() -> None:
     environment = PickPlaceEnv("T2", "L0", "state")
     check_env(environment, skip_render_check=True)
     environment.close()
+
+
+def test_image_size_is_configurable_without_changing_the_default() -> None:
+    """Keep policy observations at 128px while allowing 256px demo rendering."""
+    default_environment = PickPlaceEnv("T2", "L1", "image")
+    dataset_environment = PickPlaceEnv("T2", "L1", "image", image_size=256)
+
+    assert default_environment.observation_space["observation.images.front"].shape == (
+        128,
+        128,
+        3,
+    )
+    assert dataset_environment.observation_space["observation.images.front"].shape == (
+        256,
+        256,
+        3,
+    )
+
+    default_environment.close()
+    dataset_environment.close()
 
 
 def test_same_seed_reproduces_scene_and_action_trajectory() -> None:
@@ -264,6 +288,26 @@ def test_language_tasks_include_instruction_observation(
     else:
         assert observation["instruction"] == instruction
     assert environment.observation_space.contains(observation)
+    environment.close()
+
+
+def test_t3l_instruction_template_split_is_disjoint_and_selectable() -> None:
+    """Keep held-out paraphrases out of data generated with training templates."""
+    train_templates = get_instruction_templates("T3-L", "train")
+    held_out_templates = get_instruction_templates("T3-L", "held-out")
+    assert train_templates
+    assert held_out_templates
+    assert set(train_templates).isdisjoint(held_out_templates)
+
+    environment = PickPlaceEnv("T3-L", "L1", "state")
+    template = held_out_templates[0]
+    observation, _ = environment.reset(
+        seed=123,
+        options={"instruction_template": template},
+    )
+
+    target_color = observation["target_object"].removeprefix("cube_")
+    assert observation["instruction"] == template.format(color=target_color)
     environment.close()
 
 
