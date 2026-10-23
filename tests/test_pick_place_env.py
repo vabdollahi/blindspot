@@ -197,6 +197,87 @@ def test_different_l1_seeds_sample_different_scene_poses() -> None:
     environment.close()
 
 
+def test_t2h_is_an_l1_only_task_with_seeded_dynamics_and_noisy_state() -> None:
+    """Reproduce hidden dynamics and seeded noisy target-pose observations."""
+    first = PickPlaceEnv("T2-H", "L1", "state")
+    second = PickPlaceEnv("T2-H", "L1", "state")
+    first_observation, _ = first.reset(seed=1234)
+    second_observation, _ = second.reset(seed=1234)
+
+    _assert_tree_equal(first_observation, second_observation)
+    np.testing.assert_array_equal(first.model.body_mass, second.model.body_mass)
+    cube_id = first.model.body("cube_red").id
+    cube_geom_id = first.model.geom("cube_red_geom").id
+    mass_scale = first.model.body_mass[cube_id] / first._base_body_mass[cube_id]
+    friction_scale = (
+        first.model.geom_friction[cube_geom_id, 0]
+        / first._base_geom_friction[cube_geom_id, 0]
+    )
+    assert 0.9 <= mass_scale <= 1.1
+    assert 0.9 <= friction_scale <= 1.1
+    assert not np.array_equal(
+        first_observation["object_poses"]["cube_red"]["position"],
+        first.data.xpos[cube_id].astype(np.float32),
+    )
+    np.testing.assert_allclose(
+        first.model.body_inertia[cube_id] / first._base_body_inertia[cube_id],
+        mass_scale,
+    )
+    blue_id = first.model.body("cube_blue").id
+    assert first.model.body_mass[blue_id] == pytest.approx(
+        first._base_body_mass[blue_id]
+    )
+    np.testing.assert_array_equal(
+        first_observation["object_poses"]["cube_blue"]["position"],
+        first.data.xpos[blue_id].astype(np.float32),
+    )
+    assert "mass_scale" not in first_observation
+    assert "friction_scale" not in first_observation
+    action = np.array([0.50, 0.0, 0.35, 0.0, 1.0], dtype=np.float32)
+    for _ in range(4):
+        first_step = first.step(action)
+        second_step = second.step(action)
+        _assert_tree_equal(first_step[0], second_step[0])
+        assert first_step[1:] == second_step[1:]
+
+    with pytest.raises(ValueError, match="only at randomization level L1"):
+        PickPlaceEnv("T2-H", "L0", "state")
+    first.close()
+    second.close()
+
+
+def test_t2h_success_requires_strict_position_and_symmetric_yaw_alignment() -> None:
+    """Enforce 1 cm and 10 degree placement limits with the cube released."""
+    environment = PickPlaceEnv("T2-H", "L1", "state")
+    environment.reset(seed=42)
+    target = environment._target_pose
+
+    environment._set_free_body(
+        "cube_red",
+        np.array([target[0] + 0.009, target[1], 0.02]),
+        np.pi / 2 + np.deg2rad(9.9),
+    )
+    mujoco.mj_forward(environment.model, environment.data)
+    assert environment.success()
+
+    environment._set_free_body(
+        "cube_red",
+        np.array([target[0], target[1], 0.02]),
+        np.deg2rad(10.1),
+    )
+    mujoco.mj_forward(environment.model, environment.data)
+    assert not environment.success()
+
+    environment._set_free_body(
+        "cube_red",
+        np.array([target[0] + 0.0101, target[1], 0.02]),
+        0.0,
+    )
+    mujoco.mj_forward(environment.model, environment.data)
+    assert not environment.success()
+    environment.close()
+
+
 def test_l2_has_seeded_visual_physical_randomization_and_distractors() -> None:
     """Create one to three distractors and reproduce L2 model randomization."""
     first = PickPlaceEnv("T3-L", "L2", "state")

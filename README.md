@@ -110,6 +110,12 @@ make evaluate-rl RL_EVAL_ARGS="--checkpoint-dir checkpoints/rl/t1-l1/seed-0 --ta
 
 Results are written as JSON under `eval/results/pure-ppo/<task>-<level>.json`, matching the scripted expert's and BC's result format.
 
+To calibrate the evaluation-only T2-H variant on 200 validation seeds with the frozen T2 checkpoint:
+
+```sh
+make evaluate-rl RL_EVAL_ARGS="--checkpoint-dir checkpoints/rl/t2-l1/seed-0/best --task T2-H --level L1 --seed-start 100000 --episodes 200 --results-dir eval/results/t2h-calibration-validation"
+```
+
 To watch a checkpoint run in the MuJoCo passive viewer:
 
 ```sh

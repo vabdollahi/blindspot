@@ -81,6 +81,26 @@ def test_custom_policy_exception_is_saved_as_an_episode_failure(
     assert result.episodes[0].error == "CustomPolicyError: forced custom policy failure"
 
 
+def test_t2h_is_available_through_the_shared_evaluation_harness(
+    tmp_path: Path,
+) -> None:
+    """Create a named T2-H evaluation result using its dedicated L1 environment."""
+    result = evaluate(
+        OSErrorPolicy(),
+        "T2-H",
+        "L1",
+        [1_000_005],
+        workers=1,
+        method="rl-t2-checkpoint",
+        results_dir=tmp_path,
+    )
+
+    assert result.task == "T2-H"
+    assert result.level == "L1"
+    assert result.episodes[0].failure_reason == "policy_error"
+    assert (tmp_path / "rl-t2-checkpoint" / "T2-H-L1.json").is_file()
+
+
 def test_parallel_evaluation_writes_reproducible_episode_json(
     tmp_path: Path,
 ) -> None:

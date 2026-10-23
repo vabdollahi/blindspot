@@ -1,0 +1,6 @@
+mass_scale: [0.9, 1.1]
+friction_scale: [0.9, 1.1]
+object_position_noise_std: 0.00015
+object_yaw_noise_std_degrees: 0.15
+placement_xy_tolerance: 0.01
+placement_yaw_tolerance_degrees: 10.0

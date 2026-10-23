@@ -5,6 +5,9 @@ tasks:
   T2:
     time_limit: 15.0
     default_target: [0.49, 0.02, 0.02]
+  T2-H:
+    time_limit: 15.0
+    default_target: [0.49, 0.02, 0.02]
   T3:
     time_limit: 15.0
   T3-L:

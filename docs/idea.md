@@ -124,7 +124,9 @@ Five layers. Each one runs on its own and is evaluated on its own. The architect
 
 ### 5.3 Dynamics-shift variant T2-H
 
-T2 with a **tight placement tolerance** (1 cm and 10° yaw), **unmodeled dynamics** (cube mass ×[0.5, 3], friction ×[0.5, 1.5]), and **observation noise** on object pose (σ ≈ 5 mm in position, 3° in yaw), all hidden from every policy and model and used only for evaluation. It tests how policies degrade, and whether world models flag the shift through their uncertainty, when dynamics leave the training distribution. Calibrate the perturbation magnitudes so the RL expert succeeds 40-75% of the time, then freeze the definition.
+T2-H is the evaluation-only T2 L1 scene with a **tight placement tolerance** (1 cm and 10° yaw), **unmodeled dynamics** (target cube mass and inertia × Uniform[0.9, 1.1], friction × Uniform[0.9, 1.1]), and **state-observation noise** on the target cube pose (independent Gaussian σ = 0.15 mm per position axis and 0.15° in yaw per observation). The randomized factors and noise parameters are hidden from policies and models; a state policy sees the noisy pose, while simulator state and the success check use the true pose. The visual observation is not synthetically altered.
+
+The perturbations are calibrated against the frozen T2 RL expert: 95/200 successes (47.5%; Wilson 95% CI 40.7-54.4%) on validation seeds 100,000-100,199 and 83/200 (41.5%; CI 34.9-48.4%) on evaluation seeds 1,000,000-1,000,199. This leaves headroom in both directions while retaining the fixed 1 cm / 10° predicate.
 
 ---
 

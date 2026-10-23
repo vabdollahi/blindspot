@@ -137,13 +137,13 @@ All predicates are implemented in code and frozen before any results are produce
 - **L1:** object and target poses.
 - **L2:** L1 plus light position and color, table and object textures, 1-3 distractor objects, camera pose jitter (±1 cm, ±2°), and object friction and mass ±20%.
 
-**T2-H perturbations** (hidden from every policy and model; used only for evaluation):
+**T2-H perturbations** (evaluation only; randomized dynamics and noise parameters are hidden, while the state policy receives the noisy pose):
 
-- cube mass ×[0.5, 3]
-- friction ×[0.5, 1.5]
-- noise on object position (σ = 5 mm) and yaw (σ = 3°) in state observations
+- target cube mass and inertia × Uniform[0.9, 1.1], sampled once per episode
+- target cube geom friction × Uniform[0.9, 1.1], sampled once per episode
+- independent zero-mean Gaussian noise on the target cube's observed position (σ = 0.15 mm per axis) and yaw (σ = 0.15°) at each state observation; this does not alter simulator state or the success predicate
 
-Calibrate these in Phase 2 so that the Phase 1b RL expert succeeds 40-75% of the time, then freeze them.
+These are calibrated in Phase 2 so that the Phase 1b T2 RL expert succeeds 40-75% of the time, then frozen in `envs/configs/t2_hard.yaml`.
 
 ---
 
@@ -512,9 +512,11 @@ World models must predict the outcome of actions an expert would not take, so th
 
 ### 2.4 Freeze T2-H
 
-- Implement the T2-H perturbations from §4 in `reset`: scale `body_mass` and `body_inertia` together, and `geom_friction`, on the environment's own model copy, then call `mujoco.mj_setConst(model, data)`. Add noise only to object poses in state observations.
-- Run the RL expert for 200 episodes on validation seeds and adjust the perturbation magnitudes until its success rate is 40-75%, so the test has headroom in both directions.
+- Implement the T2-H perturbations from §4 in `reset`: independently sample one uniform mass scale and one uniform friction scale per episode for the target cube; scale `body_mass` and `body_inertia` together, and `geom_friction`, on the environment's own model copy, then call `mujoco.mj_setConst(model, data)`. Add independent Gaussian noise only to the target cube pose in state observations; do not perturb simulator state or the success checks.
+- Use the T2 L1 scene distribution and keep T2-H evaluation-only. Run the frozen T2 RL expert for 200 episodes on validation seeds (`--checkpoint-dir checkpoints/rl/t2-l1/seed-0/best --task T2-H --level L1 --seed-start 100000 --episodes 200`) and adjust `envs/configs/t2_hard.yaml` until success is 40-75%, so the test has headroom in both directions.
 - Freeze the config (`envs/configs/t2_hard.yaml`) and tag the commit.
+
+**Calibration record:** `checkpoints/rl/t2-l1/seed-0/best` achieved 95/200 (47.5%, Wilson 95% CI 40.7-54.4%) on validation seeds 100,000-100,199 and 83/200 (41.5%, Wilson 95% CI 34.9-48.4%) on evaluation seeds 1,000,000-1,000,199 with the frozen config. The evaluation JSON is `eval/results/pure-ppo/T2-H-L1.json`.
 
 **Check:** the RL expert's T2-H success on evaluation seeds is within 40-75%, and the config is tagged.
 

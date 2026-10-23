@@ -14,7 +14,7 @@ def _parse_args() -> argparse.Namespace:
     """Parse checkpoint evaluation options."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint-dir", type=Path, required=True)
-    parser.add_argument("--task", choices=RL_TASKS, default="T1")
+    parser.add_argument("--task", choices=(*RL_TASKS, "T2-H"), default="T1")
     parser.add_argument("--level", choices=("L0", "L1", "L2"), default="L1")
     parser.add_argument("--episodes", type=int, default=100)
     parser.add_argument("--seed-start", type=int, default=1_000_000)
@@ -31,6 +31,8 @@ def main() -> None:
         raise SystemExit("--episodes must be positive")
     if arguments.seed_start < 0:
         raise SystemExit("--seed-start must be non-negative")
+    if arguments.task == "T2-H" and arguments.level != "L1":
+        raise SystemExit("T2-H evaluation is defined only at level L1")
     if not (arguments.checkpoint_dir / "model.zip").is_file():
         raise SystemExit(f"No model.zip found under {arguments.checkpoint_dir}")
 

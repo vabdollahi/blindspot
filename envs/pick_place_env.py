@@ -75,6 +75,19 @@ class TaskDefinition(BaseModel):
     goal_sequence: list[GoalDefinition] = Field(default_factory=list)
 
 
+class T2HardConfig(BaseModel):
+    """Validate the evaluation-only T2-H perturbations and success tolerances."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mass_scale: tuple[float, float]
+    friction_scale: tuple[float, float]
+    object_position_noise_std: float
+    object_yaw_noise_std_degrees: float
+    placement_xy_tolerance: float
+    placement_yaw_tolerance_degrees: float
+
+
 class TaskConfigFile(BaseModel):
     """Validate the task configuration file."""
 
@@ -137,7 +150,9 @@ def get_instruction_templates(
     if normalized_task == "T3L":
         normalized_task = "T3-L"
     if normalized_task not in _TASK_CONFIGS:
-        raise ValueError(f"Unsupported task {task!r}; choose from {tuple(_TASK_CONFIGS)}")
+        raise ValueError(
+            f"Unsupported task {task!r}; choose from {tuple(_TASK_CONFIGS)}"
+        )
 
     definition = _TASK_CONFIGS[normalized_task]
     if split == "train":
@@ -161,6 +176,7 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 
 
 _TASK_CONFIGS, _LEVEL_CONFIGS = _load_task_configs()
+_T2_HARD_CONFIG = T2HardConfig.model_validate(_load_yaml(_CONFIG_DIR / "t2_hard.yaml"))
 
 
 class PickPlaceEnv(gym.Env[dict[str, Any], np.ndarray]):
@@ -185,12 +201,16 @@ class PickPlaceEnv(gym.Env[dict[str, Any], np.ndarray]):
         normalized_task = task.strip().upper().replace("_", "-")
         if normalized_task == "T3L":
             normalized_task = "T3-L"
+        if normalized_task == "T2H":
+            normalized_task = "T2-H"
         if normalized_task not in _TASK_CONFIGS:
             raise ValueError(
                 f"Unsupported task {task!r}; choose from {tuple(_TASK_CONFIGS)}"
             )
         if level not in _LEVEL_CONFIGS:
             raise ValueError(f"Unsupported randomization level {level!r}")
+        if normalized_task == "T2-H" and level != "L1":
+            raise ValueError("T2-H is defined only at randomization level L1")
         if obs_mode not in {"state", "image"}:
             raise ValueError("obs_mode must be 'state' or 'image'")
         if render_mode not in {None, "rgb_array"}:
@@ -265,6 +285,8 @@ class PickPlaceEnv(gym.Env[dict[str, Any], np.ndarray]):
         ].copy()
         self._rng_scene: np.random.Generator | None = None
         self._rng_visual: np.random.Generator | None = None
+        self._rng_t2h_dynamics: np.random.Generator | None = None
+        self._rng_t2h_observation: np.random.Generator | None = None
         self._episode_steps = 0
         self._collision_count = 0
         self._success_hold_steps = 0
@@ -400,9 +422,20 @@ class PickPlaceEnv(gym.Env[dict[str, Any], np.ndarray]):
             if seed is not None
             else int(self.np_random.integers(TRAIN_SEED_START, TRAIN_SEED_STOP))
         )
-        generators = named_generators(actual_seed, ("scene", "visual", "curriculum"))
+        generators = named_generators(
+            actual_seed,
+            (
+                "scene",
+                "visual",
+                "curriculum",
+                "t2h_dynamics",
+                "t2h_observation",
+            ),
+        )
         self._rng_scene = generators["scene"]
         self._rng_visual = generators["visual"]
+        self._rng_t2h_dynamics = generators["t2h_dynamics"]
+        self._rng_t2h_observation = generators["t2h_observation"]
         self._restore_model()
         mujoco.mj_resetData(self.model, self.data)
         self._initialize_robot()
@@ -413,6 +446,7 @@ class PickPlaceEnv(gym.Env[dict[str, Any], np.ndarray]):
             raise TypeError("instruction_template must be a string")
         self._sample_episode(instruction_template=instruction_template)
         self._apply_level_randomization()
+        self._apply_t2h_dynamics_randomization()
         qpos = self.data.qpos.copy()
         qvel = self.data.qvel.copy()
         mujoco.mj_setConst(self.model, self.data)
@@ -493,7 +527,6 @@ class PickPlaceEnv(gym.Env[dict[str, Any], np.ndarray]):
             return False
         return is_grasped(self.model, self.data, name)
 
-
     def step(
         self,
         action: np.ndarray,
@@ -535,8 +568,7 @@ class PickPlaceEnv(gym.Env[dict[str, Any], np.ndarray]):
 
         terminated = self._episode_done
         truncated = (
-            not terminated
-            and self._episode_steps >= self._episode_time_limit_steps
+            not terminated and self._episode_steps >= self._episode_time_limit_steps
         )
         if truncated and self._failure_reason is None:
             self._failure_reason = "timeout"
@@ -624,7 +656,7 @@ class PickPlaceEnv(gym.Env[dict[str, Any], np.ndarray]):
                     dtype=np.float64,
                 )
             self._target_pose = np.array([*target, 0.0], dtype=np.float64)
-        elif self.task == "T2":
+        elif self.task in {"T2", "T2-H"}:
             self._active_cube_names = ("cube_red",)
             self._target_object = "cube_red"
             target_xy = (
@@ -854,17 +886,7 @@ class PickPlaceEnv(gym.Env[dict[str, Any], np.ndarray]):
         for name in randomized_bodies:
             mass_scale = float(random.uniform(*self._level_config.mass_scale))
             friction_scale = float(random.uniform(*self._level_config.friction_scale))
-            body_id = self.model.body(name).id
-            self.model.body_mass[body_id] = self._base_body_mass[body_id] * mass_scale
-            self.model.body_inertia[body_id] = (
-                self._base_body_inertia[body_id] * mass_scale
-            )
-            geom_start = int(self.model.body_geomadr[body_id])
-            geom_count = int(self.model.body_geomnum[body_id])
-            geom_ids = slice(geom_start, geom_start + geom_count)
-            self.model.geom_friction[geom_ids] = (
-                self._base_geom_friction[geom_ids] * friction_scale
-            )
+            self._scale_body_dynamics(name, mass_scale, friction_scale)
 
         self._randomize_material_colors(random)
         self._randomize_textures(random)
@@ -880,6 +902,35 @@ class PickPlaceEnv(gym.Env[dict[str, Any], np.ndarray]):
                 0.0,
                 1.0,
             )
+
+    def _apply_t2h_dynamics_randomization(self) -> None:
+        """Apply the per-episode T2-H mass and friction shifts to the target cube."""
+        if self.task != "T2-H":
+            return
+        if self._rng_t2h_dynamics is None:
+            raise RuntimeError("reset must initialize the T2-H dynamics generator")
+        mass_scale = float(self._rng_t2h_dynamics.uniform(*_T2_HARD_CONFIG.mass_scale))
+        friction_scale = float(
+            self._rng_t2h_dynamics.uniform(*_T2_HARD_CONFIG.friction_scale)
+        )
+        self._scale_body_dynamics(self._target_object, mass_scale, friction_scale)
+
+    def _scale_body_dynamics(
+        self,
+        name: str,
+        mass_scale: float,
+        friction_scale: float,
+    ) -> None:
+        """Scale one body's mass and inertia together and its geoms' friction."""
+        body_id = self.model.body(name).id
+        self.model.body_mass[body_id] = self._base_body_mass[body_id] * mass_scale
+        self.model.body_inertia[body_id] = self._base_body_inertia[body_id] * mass_scale
+        geom_start = int(self.model.body_geomadr[body_id])
+        geom_count = int(self.model.body_geomnum[body_id])
+        geom_ids = slice(geom_start, geom_start + geom_count)
+        self.model.geom_friction[geom_ids] = (
+            self._base_geom_friction[geom_ids] * friction_scale
+        )
 
     def _randomize_material_colors(self, random: np.random.Generator) -> None:
         """Vary object and table material colors while preserving cube color identity."""
@@ -991,21 +1042,43 @@ class PickPlaceEnv(gym.Env[dict[str, Any], np.ndarray]):
         }
         if self.obs_mode == "state":
             observation["object_poses"] = {
-                name: {
-                    "position": np.asarray(
-                        self.data.xpos[self.model.body(name).id], dtype=np.float32
-                    ).copy(),
-                    "quaternion_wxyz": np.asarray(
-                        self.data.xquat[self.model.body(name).id], dtype=np.float32
-                    ).copy(),
-                }
-                for name in self._object_names
+                name: self._observed_object_pose(name) for name in self._object_names
             }
             observation["target_pose"] = self._current_target_pose().astype(np.float32)
             observation["target_object"] = self._current_target_object()
         else:
             observation.update(self.observe_images())
         return observation
+
+    def _observed_object_pose(self, name: str) -> dict[str, np.ndarray]:
+        """Return an object pose, adding T2-H noise only to the target observation."""
+        body_id = self.model.body(name).id
+        position = np.asarray(self.data.xpos[body_id], dtype=np.float32).copy()
+        quaternion = np.asarray(self.data.xquat[body_id], dtype=np.float64).copy()
+        if self.task == "T2-H" and name == self._target_object:
+            if self._rng_t2h_observation is None:
+                raise RuntimeError(
+                    "reset must initialize the T2-H observation generator"
+                )
+            position += self._rng_t2h_observation.normal(
+                0.0,
+                _T2_HARD_CONFIG.object_position_noise_std,
+                size=3,
+            ).astype(np.float32)
+            yaw_noise = np.deg2rad(
+                self._rng_t2h_observation.normal(
+                    0.0,
+                    _T2_HARD_CONFIG.object_yaw_noise_std_degrees,
+                )
+            )
+            orientation = quat_wxyz_to_scipy(quaternion)
+            quaternion = scipy_to_quat_wxyz(
+                Rotation.from_euler("z", yaw_noise) * orientation
+            )
+        return {
+            "position": position,
+            "quaternion_wxyz": np.asarray(quaternion, dtype=np.float32),
+        }
 
     def _render_camera(self, camera_name: str) -> np.ndarray:
         """Render one named camera at this environment's configured resolution."""
@@ -1042,7 +1115,7 @@ class PickPlaceEnv(gym.Env[dict[str, Any], np.ndarray]):
             )
         if self.task == "T1":
             return self._target_pose.copy()
-        if self.task == "T2":
+        if self.task in {"T2", "T2-H"}:
             return self._target_pose.copy()
         if self.task in {"T3", "T3-L"}:
             bowl_position = self.data.xpos[self.model.body("bowl").id]
@@ -1071,6 +1144,8 @@ class PickPlaceEnv(gym.Env[dict[str, Any], np.ndarray]):
             return bool(np.linalg.norm(tcp_position - self._target_pose[:3]) <= 0.005)
         if self.task == "T2":
             return self._cube_in_target_zone(self._current_target_object())
+        if self.task == "T2-H":
+            return self._cube_in_t2_hard_target_zone()
         if self.task == "T5":
             goal = self._task_config.goal_sequence[self._t5_goal_index]
             return self._goal_predicate(goal)
@@ -1104,6 +1179,24 @@ class PickPlaceEnv(gym.Env[dict[str, Any], np.ndarray]):
         target = self.model.geom_pos[self._target_zone_geom_id]
         return bool(
             np.linalg.norm(position[:2] - target[:2]) <= 0.03
+            and self._body_is_at_rest(name)
+        )
+
+    def _cube_in_t2_hard_target_zone(self) -> bool:
+        """Check T2-H's tight xy and 90-degree-symmetric yaw tolerances at rest."""
+        name = self._current_target_object()
+        body_id = self.model.body(name).id
+        position = self.data.xpos[body_id]
+        target = self.model.geom_pos[self._target_zone_geom_id]
+        cube_yaw = yaw_from_quat_wxyz(self.data.xquat[body_id])
+        yaw_error = (
+            (cube_yaw - self._target_pose[3] + np.pi / 4) % (np.pi / 2)
+        ) - np.pi / 4
+        return bool(
+            np.linalg.norm(position[:2] - target[:2])
+            <= _T2_HARD_CONFIG.placement_xy_tolerance
+            and abs(yaw_error)
+            <= np.deg2rad(_T2_HARD_CONFIG.placement_yaw_tolerance_degrees)
             and self._body_is_at_rest(name)
         )
 

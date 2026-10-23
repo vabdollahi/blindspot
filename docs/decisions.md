@@ -51,3 +51,9 @@ The choices below define the current implementation. The [roadmap](roadmap.md) i
 | Seeds | Unseeded training resets draw from the training range [0, 100,000). | Keeps automatic resets out of the validation and evaluation ranges (§3). |
 | PPO | `n_steps = 2048`, `log_std_init = −0.5`, `target_kl = 0.03`; an entropy bonus and gSDE are available but off by default. | About 55 T2 episodes per update, initial exploration noise sized for delta actions, and bounded policy updates. |
 | Diagnostics | Each rollout logs training success, a stage funnel (reached, grasped, lifted, carried, placed), per-term reward sums, and PPO's `train/*` metrics to `logs/progress.csv`. | Shows which stage limits a run without tracing rollouts by hand. |
+
+## T2-H calibration status
+
+The evaluation-only T2-H implementation uses independent uniform per-episode target-cube mass and friction scales from `envs/configs/t2_hard.yaml`; mass and inertia share the same scale. State observations add independent Gaussian position noise (0.15 mm standard deviation per axis) and yaw noise (0.15° standard deviation) only to the target cube pose. The success predicate requires the cube to be at rest, released, within 1 cm of the target-zone center, and aligned within 10° modulo the cube's 90° symmetry. Neither simulator state nor success checks are perturbed.
+
+Calibration used `checkpoints/rl/t2-l1/seed-0/best`. It achieved 95/200 successes (47.5%; Wilson 95% CI 40.7-54.4%) on validation seeds 100,000-100,199 and 83/200 (41.5%; Wilson 95% CI 34.9-48.4%) on evaluation seeds 1,000,000-1,000,199. The frozen parameters are recorded in `envs/configs/t2_hard.yaml`; the evaluation result is `eval/results/pure-ppo/T2-H-L1.json`.

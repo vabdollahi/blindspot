@@ -26,7 +26,7 @@ from eval.schema import EpisodeResult, EvaluationResult, EvaluationSummary
 from eval.stats import wilson_interval
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
-_TASKS = {"T1", "T2", "T3", "T3-L", "T4", "T5"}
+_TASKS = {"T1", "T2", "T2-H", "T3", "T3-L", "T4", "T5"}
 _LEVELS = {"L0", "L1", "L2"}
 _WORKER_POLICY: Policy | None = None
 _WORKER_ENV: PickPlaceEnv | None = None
@@ -239,7 +239,9 @@ def _worker_count(workers: int | None, episodes: int) -> int:
 def _normalize_task(task: str) -> str:
     """Normalize task spelling to the environment's canonical task ID."""
     normalized = task.strip().upper().replace("_", "-")
-    return "T3-L" if normalized == "T3L" else normalized
+    if normalized == "T3L":
+        return "T3-L"
+    return "T2-H" if normalized == "T2H" else normalized
 
 
 def _method_name(method: str) -> str:
@@ -269,7 +271,10 @@ def _config_hash(task: str, level: str, obs_mode: str) -> str:
     """Hash the task/level YAML inputs and observation-mode configuration."""
     digest = hashlib.sha256()
     config_dir = _PROJECT_ROOT / "envs" / "configs"
-    for filename in ("tasks.yaml", "levels.yaml"):
+    filenames = ["tasks.yaml", "levels.yaml"]
+    if task == "T2-H":
+        filenames.append("t2_hard.yaml")
+    for filename in filenames:
         digest.update(filename.encode("utf-8"))
         digest.update((config_dir / filename).read_bytes())
     digest.update(
