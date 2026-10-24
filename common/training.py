@@ -54,6 +54,7 @@ class TrainingRunRecord(BaseModel):
     config: dict[str, Any]
     settings: TrainingSettings
     git_commit: str
+    git_dirty: bool
     seeds: dict[str, list[int]]
     dataset_id: str
     dataset_version: str
@@ -315,6 +316,9 @@ class TrainingRun:
                 )
             normalized_seeds[name] = list(values)
 
+        git_commit = _git_commit()
+        git_dirty = _git_dirty()
+
         try:
             from torch.utils.tensorboard import SummaryWriter
         except ImportError as error:
@@ -348,7 +352,8 @@ class TrainingRun:
         self.record = TrainingRunRecord(
             config=_safe_config(config.model_dump(mode="json")),
             settings=settings,
-            git_commit=_git_commit(),
+            git_commit=git_commit,
+            git_dirty=git_dirty,
             seeds=normalized_seeds,
             dataset_id=dataset_id,
             dataset_version=dataset_version,
@@ -684,6 +689,19 @@ def _git_commit() -> str:
     if not commit:
         raise RuntimeError("Git returned an empty commit hash")
     return commit
+
+
+def _git_dirty() -> bool:
+    """Return whether the checkout has tracked or untracked working-tree changes."""
+    project_root = Path(__file__).resolve().parents[1]
+    completed = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=project_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return bool(completed.stdout.strip())
 
 
 def _hardware_info(device: torch.device) -> dict[str, str | bool | int]:

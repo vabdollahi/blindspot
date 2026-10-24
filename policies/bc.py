@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, Literal
 
@@ -363,8 +363,10 @@ def train_behavior_cloning(
     train_dataset: Dataset[dict[str, Tensor]],
     validation_dataset: Dataset[dict[str, Tensor]],
     config: BCTrainingConfig,
+    *,
+    on_epoch_end: Callable[[BCEpochMetrics, float], None] | None = None,
 ) -> tuple[StateBC | ImageBC, BCTrainingResult]:
-    """Train a BC model with L1 loss and restore the best validation checkpoint."""
+    """Train BC unchanged and optionally report epoch metrics to a run adapter."""
     if len(train_dataset) == 0 or len(validation_dataset) == 0:
         raise ValueError("Training and validation datasets must both be non-empty")
     torch.manual_seed(config.seed)
@@ -407,23 +409,31 @@ def train_behavior_cloning(
     )
     for epoch in epoch_progress:
         model.train()
-        training_l1 = _train_epoch(
-            model, policy_type, train_loader, optimizer, device, config.max_grad_norm
+        training_l1, mean_gradient_norm = _train_epoch(
+            model,
+            policy_type,
+            train_loader,
+            optimizer,
+            device,
+            config.max_grad_norm,
+            collect_gradient_norm=on_epoch_end is not None,
         )
-        validation_l1 = _evaluate(model, policy_type, validation_loader, device).l1
-        history.append(
-            BCEpochMetrics(
-                epoch=epoch,
-                training_l1=training_l1,
-                validation_l1=validation_l1,
-            )
+        epoch_metrics = BCEpochMetrics(
+            epoch=epoch,
+            training_l1=training_l1,
+            validation_l1=_evaluate(model, policy_type, validation_loader, device).l1,
         )
+        history.append(epoch_metrics)
+        if on_epoch_end is not None:
+            if mean_gradient_norm is None:
+                raise RuntimeError("BC epoch did not produce gradient norm metrics")
+            on_epoch_end(epoch_metrics, mean_gradient_norm)
         epoch_progress.set_postfix(
             train_l1=f"{training_l1:.4f}",
-            val_l1=f"{validation_l1:.4f}",
+            val_l1=f"{epoch_metrics.validation_l1:.4f}",
         )
-        if validation_l1 < best_validation_l1:
-            best_validation_l1 = validation_l1
+        if epoch_metrics.validation_l1 < best_validation_l1:
+            best_validation_l1 = epoch_metrics.validation_l1
             best_epoch = epoch
             best_state = _copy_model_state(model)
             epochs_without_improvement = 0
@@ -698,26 +708,41 @@ def _train_epoch(
     optimizer: torch.optim.Optimizer,
     device: torch.device,
     max_grad_norm: float,
-) -> float:
+    *,
+    collect_gradient_norm: bool,
+) -> tuple[float, float | None]:
     """Train one epoch using L1 action regression and gradient clipping."""
     model.train()
     total_loss = 0.0
     total_samples = 0
+    gradient_norm_sum: Tensor | None = None
+    batch_count = 0
     progress = tqdm(loader, desc="Train batches", unit="batch", leave=False)
     for batch in progress:
         prediction, action = _predict_batch(model, policy_type, batch, device)
         loss = nn.functional.l1_loss(prediction, action)
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
-        clip_grad_norm_(model.parameters(), max_grad_norm)
+        gradient_norm = clip_grad_norm_(model.parameters(), max_grad_norm)
+        if collect_gradient_norm:
+            if gradient_norm_sum is None:
+                gradient_norm_sum = gradient_norm.detach().clone()
+            else:
+                gradient_norm_sum.add_(gradient_norm.detach())
         optimizer.step()
         batch_size = action.shape[0]
         total_loss += float(loss.detach()) * batch_size
         total_samples += batch_size
+        batch_count += 1
         progress.set_postfix(l1=f"{float(loss.detach()):.4f}")
     if total_samples == 0:
         raise ValueError("Training dataloader produced no samples")
-    return total_loss / total_samples
+    mean_gradient_norm = None
+    if collect_gradient_norm:
+        if gradient_norm_sum is None or batch_count == 0:
+            raise RuntimeError("Training dataloader produced no gradient metrics")
+        mean_gradient_norm = float(gradient_norm_sum / batch_count)
+    return total_loss / total_samples, mean_gradient_norm
 
 
 def _evaluate(

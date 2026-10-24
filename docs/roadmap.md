@@ -488,7 +488,7 @@ Extend `data/generate.py`:
 - Keep only successful episodes for the policy datasets and log the discard rate.
 - Generate 400 successful episodes each for T2 and T3 at L1, with 5% held out for validation. T4 is optional (§17).
 
-**Check:** the datasets load with `LeRobotDataset`; features, shapes, fps, and episode counts are as expected; spot-check frames from 5 episodes; a noise-free subset replayed open-loop from the same seeds succeeds at least 95% of the time.
+**Check:** the datasets load with `LeRobotDataset`; features, shapes, fps, and episode counts are as expected; spot-check frames from 5 episodes. Open-loop replay is an optional diagnostic, not a dataset acceptance gate: when requested with `--verify-open-loop`, collect without action noise and record the same-seed clean-action replay rate in the manifest. A rate below 95% emits a warning but does not reject the dataset; interpret it as a measure of feedback dependence, not demonstration validity.
 
 > The existing 128 px T2-L1 dataset and BC checkpoints, collected from the scripted expert, remain comparison baselines; label them as scripted-expert baselines wherever they are reported.
 
@@ -533,7 +533,7 @@ World models must predict the outcome of actions an expert would not take, so th
 └── <native checkpoint files>   # written by the method adapter
 ```
 
-The common run record captures the config, git commit, train/validation seeds, dataset ID and version, hardware, selected precision and any fp32 fallback, and run status. TensorBoard tracks scalar losses, gradient norms, learning rates, and throughput; do not log parameter histograms or use Weights & Biases. `TrainingRun` does not create datasets, models, or a universal optimizer loop.
+The common run record captures the config, git commit and dirty-worktree status, train/validation seeds, dataset ID and version, hardware, selected precision and any fp32 fallback, and run status. TensorBoard tracks scalar losses, gradient norms, learning rates, and throughput; do not log parameter histograms or use Weights & Biases. `TrainingRun` does not create datasets, models, or a universal optimizer loop.
 
 **Adapters and boundaries:**
 

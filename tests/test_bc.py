@@ -1,10 +1,13 @@
 import importlib
+import json
 
 import numpy as np
 import pytest
 
 torch = pytest.importorskip("torch")
-pytest.importorskip("torchvision")  # policies.bc needs it; the "rl" extra installs torch without it
+pytest.importorskip(
+    "torchvision"
+)  # policies.bc needs it; the "rl" extra installs torch without it
 bc = importlib.import_module("policies.bc")
 
 
@@ -100,6 +103,64 @@ def test_bc_models_train_and_reduce_validation_l1(policy_type: str) -> None:
     assert set(result.validation_action_mae) == set(bc.ACTION_COMPONENT_NAMES)
     assert len(result.validation_episode_l1) == 4
     assert next(model.parameters()).device.type == "cpu"
+
+
+def test_shared_bc_run_preserves_results_and_checkpoint_format(tmp_path) -> None:
+    """Adapt BC logging while preserving its training result and checkpoint."""
+    pytest.importorskip("tensorboard")
+    from scripts.train_bc import _train_bc_run
+
+    dataset = SyntheticBCDataset("state")
+    config = bc.BCTrainingConfig(
+        epochs=2,
+        batch_size=8,
+        learning_rate=0.01,
+        weight_decay=0.0,
+        device="cpu",
+        seed=17,
+        patience=2,
+        pretrained=False,
+    )
+    expected_model, expected_result = bc.train_behavior_cloning(
+        "state",
+        dataset,
+        dataset,
+        config,
+    )
+
+    checkpoint_path, run_record = _train_bc_run(
+        output_dir=tmp_path / "run",
+        policy_type="state",
+        train_data=dataset,
+        validation_data=dataset,
+        config=config,
+        dataset_id="blindspot/synthetic",
+        dataset_splits={
+            "train": "blindspot/synthetic-train",
+            "validation": "blindspot/synthetic-validation",
+        },
+        dataset_version="test-version",
+        seeds={"train": [17], "validation": [100_000]},
+        task="T2",
+        level="L1",
+        rollout_validation_seeds=None,
+    )
+
+    policy = bc.load_bc_policy(checkpoint_path, device="cpu")
+    assert run_record.status == "completed"
+    assert run_record.dataset_id == "blindspot/synthetic"
+    assert run_record.result == expected_result
+    assert checkpoint_path.name == "checkpoint.pt"
+    for name, expected in expected_model.state_dict().items():
+        assert torch.equal(policy.model.state_dict()[name], expected)
+    saved_record = json.loads(
+        (tmp_path / "run" / "run.json").read_text(encoding="utf-8")
+    )
+    assert saved_record["policy_type"] == "state"
+    assert saved_record["status"] == "completed"
+    assert saved_record["dataset_version"] == "test-version"
+    assert saved_record["settings"]["precision"] == "fp32"
+    assert list((tmp_path / "run" / "tensorboard").glob("events.out.tfevents.*"))
 
 
 @pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS is unavailable")

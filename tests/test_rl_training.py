@@ -1,5 +1,6 @@
 import importlib
 from pathlib import Path
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -10,6 +11,23 @@ RLTrainingConfig = rl.RLTrainingConfig
 RLTrainingResult = rl.RLTrainingResult
 train_ppo_expert = rl.train_ppo_expert
 resume_ppo_expert = rl.resume_ppo_expert
+
+
+def test_training_run_output_format_offsets_resumed_steps() -> None:
+    """Record resumed TensorBoard values from the new run's local step zero."""
+    training_run = Mock()
+    output_format = rl._TrainingRunOutputFormat(training_run, step_offset=500)
+    output_format.write(
+        {
+            "train/loss": 0.25,
+            "train/n_updates": 12,
+            "message": "skip",
+        },
+        {"train/n_updates": ("tensorboard",)},
+        step=540,
+    )
+
+    training_run.log_metrics.assert_called_once_with(40, {"train/loss": 0.25})
 
 
 def _tiny_config(**overrides: object) -> RLTrainingConfig:
@@ -159,6 +177,91 @@ def test_training_logs_the_stage_funnel_and_ppo_metrics(tmp_path: Path) -> None:
     assert model.policy.log_std.detach().numpy() == pytest.approx(
         config.log_std_init, abs=0.1
     )
+
+
+def test_shared_run_adapter_preserves_ppo_results_and_checkpoint_pair(
+    tmp_path: Path,
+) -> None:
+    """Forward SB3 metrics to the shared run without changing PPO updates."""
+    pytest.importorskip("tensorboard")
+    import torch
+
+    from common.training import TrainingRun, TrainingSettings
+
+    config = _tiny_config(total_timesteps=128)
+    validation_seeds = [100_000, 100_001]
+    baseline_model, baseline_env, baseline_result = train_ppo_expert(
+        "T1",
+        "L0",
+        config,
+        validation_seeds,
+    )
+    baseline_state = {
+        name: value.detach().clone()
+        for name, value in baseline_model.policy.state_dict().items()
+    }
+    baseline_env.close()
+
+    output_dir = tmp_path / "shared-run"
+    settings = TrainingSettings(
+        seed=config.seed,
+        device="cpu",
+        precision="fp32",
+        max_grad_norm=0.5,
+    )
+    with TrainingRun(
+        output_dir,
+        config=config,
+        dataset_id="online-mujoco/T1-L0",
+        dataset_version="test-version",
+        seeds={"train": [config.seed], "validation": validation_seeds},
+        settings=settings,
+    ) as training_run:
+        model, vec_env, result = train_ppo_expert(
+            "T1",
+            "L0",
+            config,
+            validation_seeds,
+            output_dir=output_dir,
+            training_run=training_run,
+        )
+        try:
+            model.save(output_dir / "model.zip")
+            vec_env.save(str(output_dir / "vecnormalize.pkl"))
+        finally:
+            vec_env.close()
+
+    assert result == baseline_result
+    for name, expected in baseline_state.items():
+        assert torch.equal(model.policy.state_dict()[name], expected)
+    assert (output_dir / "model.zip").is_file()
+    assert (output_dir / "vecnormalize.pkl").is_file()
+    assert (output_dir / "run.json").is_file()
+    assert list((output_dir / "tensorboard").glob("events.out.tfevents.*"))
+
+    from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+
+    from scripts.train_rl import RLRunRecord
+
+    event_accumulator = EventAccumulator(str(output_dir / "tensorboard"))
+    event_accumulator.Reload()
+    scalar_tags = set(event_accumulator.Tags()["scalars"])
+    assert "eval/success_rate" in scalar_tags
+    assert "train/learning_rate" in scalar_tags
+    assert "train/loss" in scalar_tags
+    record_data = training_run.record.model_dump(mode="python")
+    record_data.update(
+        {
+            "task": "T1",
+            "level": "L0",
+            "validation_seeds": validation_seeds,
+            "result": result,
+            "resumed_from": None,
+        }
+    )
+    run_record = RLRunRecord.model_validate(record_data)
+    assert run_record.status == "completed"
+    assert run_record.result == result
 
 
 def test_rl_policy_emits_absolute_actions_tracking_its_own_target() -> None:

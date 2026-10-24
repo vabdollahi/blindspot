@@ -25,7 +25,7 @@ make verify-training
 
 This is shared run infrastructure, not a replacement for each algorithm's training loop. It lives in `common/training.py`; BC, Stable-Baselines3 PPO, LeRobot, and research models keep their own data pipelines, validation rules, and native checkpoint formats, and connect through thin adapters.
 
-The generic check compares a single-process run with a two-process CPU/Gloo run and verifies exact checkpoint resume. When a trainer starts a `TrainingRun`, it creates its run directory with `run.json` and a `tensorboard/` event directory; the method-specific adapter writes its native checkpoint there. The run record includes config, git commit, seeds, dataset ID/version, hardware, and precision selection/fallback. TensorBoard receives scalar loss, gradient norm, learning rate, and throughput values only—no parameter histograms and no Weights & Biases.
+The generic check compares a single-process run with a two-process CPU/Gloo run and verifies exact checkpoint resume. When a trainer starts a `TrainingRun`, it creates its run directory with `run.json` and a `tensorboard/` event directory; the method-specific adapter writes its native checkpoint there. The run record includes config, git commit and dirty-worktree status, seeds, dataset ID/version, hardware, and precision selection/fallback. TensorBoard receives scalar loss, gradient norm, learning rate, and throughput values only—no parameter histograms and no Weights & Biases.
 
 ## Evaluation
 
@@ -160,7 +160,7 @@ make demos DEMO_ARGS="--task T3-L"
 make demos DEMO_ARGS="--task T3-L --instruction-template-split held-out"
 ```
 
-Each policy step has a 1% chance of receiving a Gaussian perturbation (1 cm xyz, 3 degrees yaw); the clean expert action remains the label, and the applied action is stored separately. To run the open-loop replay check, set both noise standard deviations to zero and pass `--verify-open-loop`.
+Each policy step has a 1% chance of receiving a Gaussian perturbation (1 cm xyz, 3 degrees yaw); the clean expert action remains the label, and the applied action is stored separately. The optional open-loop diagnostic requires both noise standard deviations to be zero and `--verify-open-loop`. It records the same-seed clean-action replay rate in `collection.json`; a low rate warns but does not reject the dataset.
 
 ## World-model interaction corpus
 

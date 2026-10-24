@@ -11,9 +11,10 @@ import numpy as np
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
-from stable_baselines3.common.logger import Logger, configure
+from stable_baselines3.common.logger import KVWriter, Logger, configure
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
 
+from common.training import TrainingRun
 from envs.rl_env import (
     RL_TASKS,
     DeltaCommandTracker,
@@ -24,6 +25,35 @@ from eval.policy import Policy
 
 # Per-episode statistics (`PickPlaceRLEnv` info["rl_episode"]) logged as stage-funnel rates.
 _FUNNEL_KEYS = ("reached", "grasped", "lifted", "carried", "placed")
+
+
+class _TrainingRunOutputFormat(KVWriter):
+    """Forward SB3 scalar metrics to the shared TensorBoard run."""
+
+    def __init__(self, training_run: TrainingRun, *, step_offset: int) -> None:
+        """Associate this SB3 output format with one shared training run."""
+        self._training_run = training_run
+        self._step_offset = step_offset
+
+    def write(
+        self,
+        key_values: dict[str, Any],
+        key_excluded: dict[str, tuple[str, ...]],
+        step: int = 0,
+    ) -> None:
+        """Forward non-excluded numeric SB3 metrics as TensorBoard scalars."""
+        metrics = {
+            name: float(value)
+            for name, value in key_values.items()
+            if "tensorboard" not in key_excluded.get(name, ())
+            and isinstance(value, (int, float, np.number))
+            and not isinstance(value, bool)
+        }
+        if metrics:
+            self._training_run.log_metrics(max(0, step - self._step_offset), metrics)
+
+    def close(self) -> None:
+        """Leave writer ownership to the shared TrainingRun."""
 
 
 class RLTrainingConfig(BaseModel):
@@ -134,7 +164,9 @@ class _SuccessRateCallback(BaseCallback):
             self._next_eval_at += self._eval_freq
             success_rate = self._evaluate()
             self.history.append(
-                RLValidationPoint(timesteps=self.num_timesteps, success_rate=success_rate)
+                RLValidationPoint(
+                    timesteps=self.num_timesteps, success_rate=success_rate
+                )
             )
             self.logger.record("eval/success_rate", success_rate)
             print(
@@ -144,7 +176,10 @@ class _SuccessRateCallback(BaseCallback):
             if self._output_dir is not None and success_rate >= self._best_success_rate:
                 self._best_success_rate = success_rate
                 self._save_snapshot(self._output_dir / "best")
-        if self._output_dir is not None and self.num_timesteps >= self._next_checkpoint_at:
+        if (
+            self._output_dir is not None
+            and self.num_timesteps >= self._next_checkpoint_at
+        ):
             self._next_checkpoint_at += self._checkpoint_freq
             self._save_snapshot(
                 self._output_dir / "checkpoints" / f"step_{self.num_timesteps}"
@@ -160,7 +195,9 @@ class _SuccessRateCallback(BaseCallback):
         normal = [episode for episode in episodes if not episode["start_grasped"]]
         grasped_start = [episode for episode in episodes if episode["start_grasped"]]
         self.logger.record("rollout/episodes", len(episodes))
-        self.logger.record("rollout/grasped_start_fraction", len(grasped_start) / len(episodes))
+        self.logger.record(
+            "rollout/grasped_start_fraction", len(grasped_start) / len(episodes)
+        )
         if grasped_start:
             self.logger.record(
                 "rollout/grasped_start_success_rate",
@@ -240,6 +277,7 @@ def _run_training(
     config: RLTrainingConfig,
     validation_seeds: Sequence[int],
     output_dir: str | Path | None = None,
+    training_run: TrainingRun | None = None,
 ) -> RLTrainingResult:
     """Run `model.learn()` with the success-rate callback and summarize the result.
 
@@ -247,11 +285,29 @@ def _run_training(
     variance) and the callback's rollout funnel are written to
     `output_dir/logs/progress.csv` and printed each rollout.
     """
-    model.set_logger(
-        configure(str(Path(output_dir) / "logs"), ["stdout", "csv"])
-        if output_dir is not None
-        else Logger(folder=None, output_formats=[])
-    )
+    if training_run is not None:
+        if output_dir is None:
+            raise ValueError("A shared TrainingRun requires an output_dir")
+        if Path(output_dir).expanduser().resolve() != training_run.output_dir:
+            raise ValueError("TrainingRun output_dir must match the PPO output_dir")
+    starting_timesteps = model.num_timesteps
+    if output_dir is None:
+        logger = Logger(folder=None, output_formats=[])
+    else:
+        logger = configure(str(Path(output_dir) / "logs"), ["stdout", "csv"])
+        if training_run is not None:
+            logger.output_formats.append(
+                _TrainingRunOutputFormat(
+                    training_run,
+                    step_offset=starting_timesteps,
+                )
+            )
+    model.set_logger(logger)
+    if training_run is not None:
+        training_run.log_metrics(
+            0,
+            {"train/learning_rate": config.learning_rate},
+        )
     callback = _SuccessRateCallback(
         task,
         level,
@@ -308,6 +364,7 @@ def train_ppo_expert(
     config: RLTrainingConfig,
     validation_seeds: Sequence[int],
     output_dir: str | Path | None = None,
+    training_run: TrainingRun | None = None,
 ) -> tuple[PPO, VecNormalize, RLTrainingResult]:
     """Train one task's pure-PPO expert from scratch, logging validation success.
 
@@ -343,7 +400,15 @@ def train_ppo_expert(
         device=config.device,
         verbose=0,
     )
-    result = _run_training(model, task, level, config, validation_seeds, output_dir)
+    result = _run_training(
+        model,
+        task,
+        level,
+        config,
+        validation_seeds,
+        output_dir,
+        training_run,
+    )
     return model, vec_env, result
 
 
@@ -354,6 +419,7 @@ def resume_ppo_expert(
     config: RLTrainingConfig,
     validation_seeds: Sequence[int],
     output_dir: str | Path | None = None,
+    training_run: TrainingRun | None = None,
 ) -> tuple[PPO, VecNormalize, RLTrainingResult]:
     """Continue training an existing Phase 1b checkpoint for more steps.
 
@@ -376,7 +442,15 @@ def resume_ppo_expert(
     )
     vec_env.training = True
     model = PPO.load(resume_from / "model.zip", env=vec_env, device=config.device)
-    result = _run_training(model, task, level, config, validation_seeds, output_dir)
+    result = _run_training(
+        model,
+        task,
+        level,
+        config,
+        validation_seeds,
+        output_dir,
+        training_run,
+    )
     return model, vec_env, result
 
 

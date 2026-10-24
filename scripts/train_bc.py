@@ -4,18 +4,16 @@ from __future__ import annotations
 
 import argparse
 import json
-import platform
-import subprocess
-import sys
 from pathlib import Path
 from typing import Literal
 
-import torch
 from pydantic import BaseModel, ConfigDict
 
+from common.training import TrainingRun, TrainingRunRecord, TrainingSettings
 from eval.runner import evaluate
 from eval.schema import EvaluationSummary
 from policies.bc import (
+    BCEpochMetrics,
     BCPolicyType,
     BCTrainingConfig,
     BCTrainingResult,
@@ -28,19 +26,14 @@ from policies.bc import (
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
-class BCRunRecord(BaseModel):
+class BCRunRecord(TrainingRunRecord):
     """Validate the reproducibility record written beside a BC checkpoint."""
 
     model_config = ConfigDict(extra="forbid")
 
-    policy_type: BCPolicyType
     config: BCTrainingConfig
-    git_commit: str
-    dataset_id: str
+    policy_type: BCPolicyType
     dataset_splits: dict[Literal["train", "validation"], str]
-    dataset_version: str
-    seeds: dict[Literal["train", "validation"], list[int]]
-    hardware: dict[str, str | bool]
     result: BCTrainingResult
     rollout_validation: EvaluationSummary | None = None
 
@@ -71,18 +64,6 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _git_commit() -> str:
-    """Return the current Git commit or 'unknown' outside a Git checkout."""
-    completed = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=_PROJECT_ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    return completed.stdout.strip() if completed.returncode == 0 else "unknown"
-
-
 def _write_json(path: Path, payload: BaseModel) -> None:
     """Atomically persist a validated Pydantic run record."""
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -109,6 +90,95 @@ def _select_output_dir(
         if not candidate.exists() and not candidate.is_symlink():
             return candidate
         run_number += 1
+
+
+def _train_bc_run(
+    *,
+    output_dir: Path,
+    policy_type: BCPolicyType,
+    train_data: LeRobotBCDataset,
+    validation_data: LeRobotBCDataset,
+    config: BCTrainingConfig,
+    dataset_id: str,
+    dataset_splits: dict[Literal["train", "validation"], str],
+    dataset_version: str,
+    seeds: dict[Literal["train", "validation"], list[int]],
+    task: str,
+    level: str,
+    rollout_validation_seeds: list[int] | None,
+) -> tuple[Path, BCRunRecord]:
+    """Train BC through the shared run lifecycle without changing its optimizer."""
+    steps_per_epoch = (len(train_data) + config.batch_size - 1) // config.batch_size
+    settings = TrainingSettings(
+        seed=config.seed,
+        device=config.device,
+        precision="fp32",
+        max_grad_norm=config.max_grad_norm,
+    )
+    rollout_summary = None
+    with TrainingRun(
+        output_dir,
+        config=config,
+        dataset_id=dataset_id,
+        dataset_version=dataset_version,
+        seeds=seeds,
+        settings=settings,
+    ) as run:
+
+        def log_epoch(metrics: BCEpochMetrics, mean_gradient_norm: float) -> None:
+            """Log completed BC epoch metrics without altering training updates."""
+            run.log_metrics(
+                metrics.epoch * steps_per_epoch,
+                {
+                    "train/loss": metrics.training_l1,
+                    "validation/loss": metrics.validation_l1,
+                    "train/gradient_norm": mean_gradient_norm,
+                    "train/learning_rate": config.learning_rate,
+                },
+            )
+
+        model, result = train_behavior_cloning(
+            policy_type,
+            train_data,
+            validation_data,
+            config,
+            on_epoch_end=log_epoch,
+        )
+        checkpoint_path = save_bc_checkpoint(
+            model,
+            policy_type,
+            output_dir / "checkpoint.pt",
+        )
+        if rollout_validation_seeds is not None:
+            if not rollout_validation_seeds:
+                raise ValueError(
+                    "Rollout validation requires held-out validation seeds"
+                )
+            rollout = evaluate(
+                load_bc_policy(checkpoint_path, device="cpu"),
+                task,
+                level,
+                rollout_validation_seeds,
+                obs_mode="image" if policy_type == "image" else "state",
+                workers=1,
+                method=f"{policy_type}-bc-validation",
+                results_dir=output_dir / "rollout-validation",
+            )
+            rollout_summary = rollout.summary
+
+    record_data = run.record.model_dump(mode="python")
+    record_data.update(
+        {
+            "config": config,
+            "policy_type": policy_type,
+            "dataset_splits": dataset_splits,
+            "result": result,
+            "rollout_validation": rollout_summary,
+        }
+    )
+    record = BCRunRecord.model_validate(record_data)
+    _write_json(output_dir / "run.json", record)
+    return checkpoint_path, record
 
 
 def main() -> None:
@@ -174,39 +244,15 @@ def main() -> None:
     policy_type: BCPolicyType = arguments.policy
     train_data = LeRobotBCDataset(train_source, policy_type)
     validation_data = LeRobotBCDataset(validation_source, policy_type)
-    model, result = train_behavior_cloning(
-        policy_type,
-        train_data,
-        validation_data,
-        config,
+    validation_seeds = (
+        manifest["validation"]["seeds"] if arguments.rollout_validation else None
     )
-
-    output_dir.mkdir(parents=True, exist_ok=False)
-    checkpoint_path = save_bc_checkpoint(
-        model,
-        policy_type,
-        output_dir / "checkpoint.pt",
-    )
-    rollout_validation = None
-    if arguments.rollout_validation:
-        validation_seeds = manifest["validation"]["seeds"]
-        if not validation_seeds:
-            raise ValueError("Rollout validation requires held-out validation seeds")
-        rollout = evaluate(
-            load_bc_policy(checkpoint_path, device="cpu"),
-            str(manifest["task"]),
-            str(manifest.get("level", "L1")),
-            validation_seeds,
-            obs_mode="image" if policy_type == "image" else "state",
-            workers=1,
-            method=f"{policy_type}-bc-validation",
-            results_dir=output_dir / "rollout-validation",
-        )
-        rollout_validation = rollout.summary
-    run_record = BCRunRecord(
+    _, run_record = _train_bc_run(
+        output_dir=output_dir,
         policy_type=policy_type,
+        train_data=train_data,
+        validation_data=validation_data,
         config=config,
-        git_commit=_git_commit(),
         dataset_id=dataset_id,
         dataset_splits={
             "train": f"{dataset_id}-train",
@@ -217,17 +263,10 @@ def main() -> None:
             "train": manifest["train"]["seeds"],
             "validation": manifest["validation"]["seeds"],
         },
-        hardware={
-            "platform": platform.platform(),
-            "python": sys.version.split()[0],
-            "torch": torch.__version__,
-            "device": result.device,
-            "mps_available": torch.backends.mps.is_available(),
-        },
-        result=result,
-        rollout_validation=rollout_validation,
+        task=str(manifest["task"]),
+        level=str(manifest.get("level", "L1")),
+        rollout_validation_seeds=validation_seeds,
     )
-    _write_json(output_dir / "run.json", run_record)
     print(run_record.model_dump_json(indent=2))
 
 

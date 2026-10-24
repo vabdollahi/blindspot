@@ -63,10 +63,10 @@ interaction-coverage:
 	uv run --locked python -m data.interaction --plot-coverage $(INTERACTION_COVERAGE_ARGS)
 
 train-bc:
-	uv run --locked --extra imitation python scripts/train_bc.py $(BC_ARGS)
+	uv run --locked --extra imitation --extra training python scripts/train_bc.py $(BC_ARGS)
 
 train-rl:
-	uv run --locked --extra rl python scripts/train_rl.py $(RL_ARGS)
+	uv run --locked --extra rl --extra training python scripts/train_rl.py $(RL_ARGS)
 
 evaluate-rl:
 	uv run --locked --extra rl python scripts/evaluate_rl.py $(RL_EVAL_ARGS)

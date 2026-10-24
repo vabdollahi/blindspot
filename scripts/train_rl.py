@@ -3,15 +3,13 @@
 from __future__ import annotations
 
 import argparse
-import platform
 import subprocess
-import sys
 from pathlib import Path
 
-import torch
 from pydantic import BaseModel, ConfigDict
 
 from common.seeding import VALIDATION_SEED_START
+from common.training import TrainingRun, TrainingRunRecord, TrainingSettings
 from envs.rl_env import RL_TASKS
 from policies.rl import (
     RLTrainingConfig,
@@ -23,17 +21,15 @@ from policies.rl import (
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
-class RLRunRecord(BaseModel):
+class RLRunRecord(TrainingRunRecord):
     """Validate the reproducibility record written beside an RL checkpoint."""
 
     model_config = ConfigDict(extra="forbid")
 
+    config: RLTrainingConfig
     task: str
     level: str
-    config: RLTrainingConfig
-    git_commit: str
     validation_seeds: list[int]
-    hardware: dict[str, str | bool]
     result: RLTrainingResult
     resumed_from: str | None = None
 
@@ -188,51 +184,65 @@ def main() -> None:
         requested_output_dir,
         automatic_versioning=arguments.output_dir is None,
     )
-    # Created before training so checkpoints can be written during the run and an
-    # existing directory fails fast.
-    output_dir.mkdir(parents=True, exist_ok=False)
+    if (
+        arguments.resume_from is not None
+        and not (arguments.resume_from / "model.zip").is_file()
+    ):
+        raise SystemExit(f"No model.zip found under {arguments.resume_from}")
 
-    if arguments.resume_from is not None:
-        if not (arguments.resume_from / "model.zip").is_file():
-            raise SystemExit(f"No model.zip found under {arguments.resume_from}")
-        model, vec_env, result = resume_ppo_expert(
-            arguments.resume_from,
-            arguments.task,
-            arguments.level,
-            config,
-            validation_seeds,
-            output_dir=output_dir,
-        )
-    else:
-        model, vec_env, result = train_ppo_expert(
-            arguments.task,
-            arguments.level,
-            config,
-            validation_seeds,
-            output_dir=output_dir,
-        )
-    try:
-        model.save(output_dir / "model.zip")
-        vec_env.save(str(output_dir / "vecnormalize.pkl"))
-    finally:
-        vec_env.close()
-
-    run_record = RLRunRecord(
-        task=arguments.task,
-        level=arguments.level,
-        config=config,
-        git_commit=_git_commit(),
-        validation_seeds=validation_seeds,
-        hardware={
-            "platform": platform.platform(),
-            "python": sys.version.split()[0],
-            "torch": torch.__version__,
-            "device": result.device,
-            "mps_available": torch.backends.mps.is_available(),
-        },
-        result=result,
-        resumed_from=str(arguments.resume_from) if arguments.resume_from else None,
+    git_commit = _git_commit()
+    settings = TrainingSettings(
+        seed=config.seed,
+        device=config.device,
+        precision="fp32",
+        max_grad_norm=0.5,
     )
+    with TrainingRun(
+        output_dir,
+        config=config,
+        dataset_id=f"online-mujoco/{arguments.task}-{arguments.level}",
+        dataset_version=f"git:{git_commit}",
+        seeds={"train": [config.seed], "validation": validation_seeds},
+        settings=settings,
+    ) as training_run:
+        if arguments.resume_from is not None:
+            model, vec_env, result = resume_ppo_expert(
+                arguments.resume_from,
+                arguments.task,
+                arguments.level,
+                config,
+                validation_seeds,
+                output_dir=output_dir,
+                training_run=training_run,
+            )
+        else:
+            model, vec_env, result = train_ppo_expert(
+                arguments.task,
+                arguments.level,
+                config,
+                validation_seeds,
+                output_dir=output_dir,
+                training_run=training_run,
+            )
+        try:
+            model.save(output_dir / "model.zip")
+            vec_env.save(str(output_dir / "vecnormalize.pkl"))
+        finally:
+            vec_env.close()
+
+    record_data = training_run.record.model_dump(mode="python")
+    record_data.update(
+        {
+            "task": arguments.task,
+            "level": arguments.level,
+            "validation_seeds": validation_seeds,
+            "result": result,
+            "resumed_from": (
+                str(arguments.resume_from) if arguments.resume_from else None
+            ),
+        }
+    )
+    run_record = RLRunRecord.model_validate(record_data)
     _write_json(output_dir / "run.json", run_record)
     print(run_record.model_dump_json(indent=2))
 

@@ -150,6 +150,7 @@ def test_training_run_writes_reproducibility_record_and_scalar_events(
     assert record["status"] == "completed"
     assert record["dataset_id"] == "tiny/train"
     assert record["dataset_version"] == "v1"
+    assert isinstance(record["git_dirty"], bool)
     assert record["precision"] == "fp32"
     assert record["config"]["api_key"] == "[REDACTED]"
     event_files = list((output_dir / "tensorboard").glob("events.out.tfevents.*"))

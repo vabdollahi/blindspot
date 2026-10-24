@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from common.seeding import named_generators
+from data import generate as generate_module
 from data.generate import (
     DATASET_IMAGE_SIZE,
     CollectionConfig,
@@ -209,7 +210,9 @@ def test_frame_preserves_clean_and_executed_actions_and_environment_state() -> N
                 "position": np.array([index, 0.0, 0.0], dtype=np.float32),
                 "quaternion_wxyz": np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
             }
-            for index, name in enumerate(("cube_red", "cube_blue", "cube_green", "bowl"))
+            for index, name in enumerate(
+                ("cube_red", "cube_blue", "cube_green", "bowl")
+            )
         },
     }
     clean_action = np.array([0.4, 0.0, 0.3, 0.1, 0.0], dtype=np.float64)
@@ -228,9 +231,7 @@ def test_frame_preserves_clean_and_executed_actions_and_environment_state() -> N
     )
 
     np.testing.assert_allclose(frame["action"], clean_action, rtol=1e-7)
-    np.testing.assert_allclose(
-        frame["action.executed"], executed_action, rtol=1e-7
-    )
+    np.testing.assert_allclose(frame["action.executed"], executed_action, rtol=1e-7)
     np.testing.assert_array_equal(
         frame["observation.environment_state"],
         frame["observation.object_poses"],
@@ -266,3 +267,77 @@ def test_open_loop_verification_requires_noise_free_collection(
 
     with pytest.raises(ValueError, match="requires both noise values to be zero"):
         generate_dataset(config, output_root=tmp_path / "datasets")
+
+
+def test_low_open_loop_rate_is_recorded_without_rejecting_dataset(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Treat open-loop replay as a diagnostic rather than a collection gate."""
+
+    class CompletedFuture:
+        """Return one completed synthetic rollout to the split collector."""
+
+        def __init__(self, rollout: object) -> None:
+            self._rollout = rollout
+
+        def result(self) -> object:
+            return self._rollout
+
+        def cancel(self) -> bool:
+            return False
+
+    class ImmediateExecutor:
+        """Run the attempt worker synchronously for this small accounting test."""
+
+        def submit(self, worker: object, seed: int) -> CompletedFuture:
+            del worker
+            return CompletedFuture(
+                generate_module.EpisodeRollout(
+                    seed=seed,
+                    success=True,
+                    target_object="cube_red",
+                    task_label="Place the red cube in the target zone.",
+                    frame_count=0,
+                    open_loop_success=False,
+                )
+            )
+
+    class EmptyDatasetWriter:
+        """Accept successful rollout frames without writing dataset files."""
+
+        def add_frame(self, frame: dict[str, object]) -> None:
+            del frame
+
+        def save_episode(self, *, parallel_encoding: bool) -> None:
+            del parallel_encoding
+
+    monkeypatch.setattr(
+        generate_module,
+        "wait",
+        lambda futures, return_when: (set(futures), set()),
+    )
+    config = CollectionConfig(
+        task="T2",
+        episodes=2,
+        workers=1,
+        verify_open_loop=True,
+        noise_position_std=0.0,
+        noise_yaw_degrees=0.0,
+        noise_probability=0.0,
+    )
+
+    summary = generate_module._collect_split(
+        ImmediateExecutor(),
+        EmptyDatasetWriter(),
+        split="train",
+        target_episodes=2,
+        seed_start=0,
+        seed_stop=100,
+        config=config,
+    )
+
+    assert summary.episodes == 2
+    assert summary.open_loop_successes == 0
+    assert summary.open_loop_rate == 0.0
+    assert "recording this diagnostic without rejecting the dataset" in caplog.text
