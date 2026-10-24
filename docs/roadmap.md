@@ -520,17 +520,37 @@ World models must predict the outcome of actions an expert would not take, so th
 
 **Check:** the RL expert's T2-H success on evaluation seeds is within 40-75%, and the config is tagged.
 
-### 2.5 Training infrastructure
+### 2.5 Shared training workflow
 
-Shared utilities for every model trained in the repo from Phase 3 on (`common/training.py`):
+**Goal:** give every trainer one consistent run lifecycle without forcing BC, PPO, LeRobot, and future research models into one training loop. The shared PyTorch utilities live in `common/training.py`; each method keeps its own model-specific Pydantic config, data pipeline, optimization loop, validation rule, and native checkpoint format.
 
-- Config-driven entry points (Pydantic configs) with `run.json` records: config, git commit, seeds, dataset ID and version, hardware.
-- Experiment tracking with TensorBoard (Weights & Biases optional), logging losses, gradient norms, learning rate, and throughput.
-- Mixed precision through `torch.autocast` where the backend supports it, with an fp32 fallback recorded in `run.json`.
-- Distributed-ready training with `torchrun` and `DistributedDataParallel`, verified locally with a 2-process `gloo` run on CPU.
-- Checkpoint and resume, gradient clipping, and NaN and divergence guards that stop a run and report the step.
+**How a run is created:** the method's training entry point chooses its usual run directory (under `checkpoints/bc/...`, `checkpoints/rl/...`, or the corresponding future method path) and starts a `TrainingRun` with its config, dataset ID/version, seeds, and runtime settings. `TrainingRun` creates the run directory and writes `run.json` plus TensorBoard event files. The method-specific trainer writes its native checkpoint alongside them:
 
-**Check:** a tiny model trains identically (same loss curve to tolerance) in 1-process and 2-process DDP runs from the same seed, and resumes bit-for-bit from a mid-run checkpoint.
+```text
+<method-specific run directory>/
+├── run.json
+├── tensorboard/                 # scalar events only
+└── <native checkpoint files>   # written by the method adapter
+```
+
+The common run record captures the config, git commit, train/validation seeds, dataset ID and version, hardware, selected precision and any fp32 fallback, and run status. TensorBoard tracks scalar losses, gradient norms, learning rates, and throughput; do not log parameter histograms or use Weights & Biases. `TrainingRun` does not create datasets, models, or a universal optimizer loop.
+
+**Adapters and boundaries:**
+
+- **BC:** adapt the existing PyTorch trainer to the shared run lifecycle and scalar logging. Keep its supervised loop, early stopping, validation metric, best-checkpoint selection, and checkpoint format.
+- **PPO:** adapt the existing Stable-Baselines3 trainer through its logger/callback boundary. Keep SB3's rollout and update loop and preserve the `model.zip` plus `VecNormalize` checkpoint pair; do not replace it with the generic PyTorch checkpoint helper.
+- **Phase 3 and later:** each LeRobot or research-model trainer connects through its supported backend interface. Native loops and checkpoints remain backend-owned; use the generic optimizer and DDP helpers only for trainers that directly own a PyTorch loop.
+
+### 2.5.1 Shared run utilities
+
+- Pydantic runtime settings and a common `run.json` record, using the method's full config and dataset lineage.
+- TensorBoard scalar logging for losses, gradient norms, learning rate, and throughput.
+- Mixed precision through `torch.autocast` where the backend supports it, with the selected precision or fp32 fallback recorded in `run.json`.
+- Distributed helpers for `torchrun`, `DistributedDataParallel`, and rank-aware data sampling. Verify the generic PyTorch path locally with 2-process `gloo` on CPU.
+- Resumable PyTorch checkpoints that capture model, optimizer, scheduler, scaler, and per-rank random states; gradient clipping and non-finite loss/gradient/parameter guards that report the step.
+- Integrate and smoke-test the existing BC and PPO entry points through adapters, confirming that their algorithm-specific validation and native checkpoints still work and that both produce the shared run metadata and TensorBoard scalars.
+
+**Check:** a tiny generic model trains identically (same loss curve to tolerance) in one-process and two-process DDP runs from the same seed, and resumes bit-for-bit from a mid-run checkpoint. Short BC and PPO adapter smoke runs also write the shared record and TensorBoard scalars while retaining their existing checkpoint formats.
 
 **Done when:** the T2, T3, and T3-L demonstration datasets and the interaction corpus exist with manifests and versions, T2-H is frozen, and the training utilities pass their checks.
 

@@ -14,6 +14,19 @@ make lint
 
 The test suite is configured with a `rendering` marker. CI excludes rendering tests because they require a graphics backend; they can be run locally when the required MuJoCo rendering dependencies are available.
 
+## Shared training infrastructure (Phase 2.5)
+
+Install the optional training dependencies and run the tiny infrastructure check:
+
+```sh
+uv sync --locked --extra training
+make verify-training
+```
+
+This is shared run infrastructure, not a replacement for each algorithm's training loop. It lives in `common/training.py`; BC, Stable-Baselines3 PPO, LeRobot, and research models keep their own data pipelines, validation rules, and native checkpoint formats, and connect through thin adapters.
+
+The generic check compares a single-process run with a two-process CPU/Gloo run and verifies exact checkpoint resume. When a trainer starts a `TrainingRun`, it creates its run directory with `run.json` and a `tensorboard/` event directory; the method-specific adapter writes its native checkpoint there. The run record includes config, git commit, seeds, dataset ID/version, hardware, and precision selection/fallback. TensorBoard receives scalar loss, gradient norm, learning rate, and throughput values only—no parameter histograms and no Weights & Biases.
+
 ## Evaluation
 
 Run one scripted-expert task and level with 100 episodes by default, using evaluation seeds starting at 1,000,000:

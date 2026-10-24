@@ -1,4 +1,4 @@
-.PHONY: setup test lint view-scene view-control view-expert view-bc view-rl evaluate baseline evaluate-bc report benchmark-scene benchmark-rl-env demos interaction interaction-coverage train-bc train-rl evaluate-rl
+.PHONY: setup test lint view-scene view-control view-expert view-bc view-rl evaluate baseline evaluate-bc report benchmark-scene benchmark-rl-env demos interaction interaction-coverage train-bc train-rl evaluate-rl verify-training
 
 INTERACTION_COVERAGE_ARGS ?= data/datasets/interaction-l1/collection.json
 
@@ -70,3 +70,6 @@ train-rl:
 
 evaluate-rl:
 	uv run --locked --extra rl python scripts/evaluate_rl.py $(RL_EVAL_ARGS)
+
+verify-training:
+	uv run --locked --extra training python scripts/verify_training.py
