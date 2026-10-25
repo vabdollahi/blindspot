@@ -1,6 +1,7 @@
-.PHONY: setup test lint view-scene view-control view-expert view-bc view-rl evaluate baseline evaluate-bc report benchmark-scene benchmark-rl-env demos interaction interaction-coverage train-bc train-rl evaluate-rl verify-training
+.PHONY: setup test lint view-scene view-control view-expert view-bc view-rl evaluate baseline evaluate-bc report benchmark-scene benchmark-rl-env demos interaction interaction-coverage train-bc train-rl evaluate-rl verify-training tensorboard
 
 INTERACTION_COVERAGE_ARGS ?= data/datasets/interaction-l1/collection.json
+TENSORBOARD_LOGDIR ?= checkpoints
 
 ifeq ($(shell uname -s),Darwin)
 VIEWER_PYTHON := uv run mjpython
@@ -73,3 +74,6 @@ evaluate-rl:
 
 verify-training:
 	uv run --locked --extra training python scripts/verify_training.py
+
+tensorboard:
+	uv run --locked --extra training tensorboard --logdir $(TENSORBOARD_LOGDIR) $(TENSORBOARD_ARGS)

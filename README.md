@@ -27,6 +27,20 @@ This is shared run infrastructure, not a replacement for each algorithm's traini
 
 The generic check compares a single-process run with a two-process CPU/Gloo run and verifies exact checkpoint resume. When a trainer starts a `TrainingRun`, it creates its run directory with `run.json` and a `tensorboard/` event directory; the method-specific adapter writes its native checkpoint there. The run record includes config, git commit and dirty-worktree status, seeds, dataset ID/version, hardware, and precision selection/fallback. TensorBoard receives scalar loss, gradient norm, learning rate, and throughput values only—no parameter histograms and no Weights & Biases.
 
+View all training runs under `checkpoints/` with:
+
+```sh
+make tensorboard
+```
+
+To view only one run, set `TENSORBOARD_LOGDIR` to its `tensorboard/` directory:
+
+```sh
+make tensorboard TENSORBOARD_LOGDIR=checkpoints/rl/t2-l1/seed-0-bc-smoke/tensorboard
+```
+
+Open the local URL printed by TensorBoard (usually `http://localhost:6006`). Stop the server with Ctrl-C.
+
 ## Evaluation
 
 Run one scripted-expert task and level with 100 episodes by default, using evaluation seeds starting at 1,000,000:
@@ -74,6 +88,10 @@ The [design decisions](docs/decisions.md#rl-environment-specification) explain t
 ![Pure-PPO policy carrying a cube into the bowl (T3-L1)](docs/media/t3-l1-pure-ppo.gif)
 
 *Pure-PPO T3-L1 policy (seed 0, best validation checkpoint) on a held-out evaluation seed: the cube is carried 30-50 cm and released into the bowl. Trained with destination-side grasped starts (`--grasped-start-probability 0.5 --destination-start-fraction 0.6`), a reverse curriculum in which some episodes begin with the cube already held on the way to the bowl, so the policy learns to place and release before it can carry that far.*
+
+![Pure-PPO policy stacking the red cube on the blue cube (T4-L1)](docs/media/t4-l1-pure-ppo.gif)
+
+*Pure-PPO T4-L1 policy (seed 0, best validation checkpoint) on evaluation seed 1,001,000: picks up the red cube, stacks it on the blue cube, and releases.*
 
 Profile the vectorized environment's throughput and render random-policy rollouts to sanity-check the reward stages:
 
