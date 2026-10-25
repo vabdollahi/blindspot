@@ -25,6 +25,13 @@ The choices below define the current implementation. The [roadmap](roadmap.md) i
 | Arm position-servo stiffness | Multiply the Panda arm actuators' position gain and position-feedback bias by 5; preserve actuator type and velocity damping. | Reduces gravity-induced TCP tracking error while retaining the Menagerie position-target interface. |
 | Grasp contact settings | Use 50 g cubes and friction `[2.0, 0.005, 0.0001]` on cubes and fingertip pads; keep `impratio=10` and `solref=[0.02, 1.0]`. | Provides stable contacts for grasping, lifting, and holding the cube. |
 
+## Basic VLA prototype
+
+- **VLM backbone:** [`HuggingFaceTB/SmolVLM2-500M-Video-Instruct`](https://huggingface.co/HuggingFaceTB/SmolVLM2-500M-Video-Instruct), an approximately 500M-parameter, Apache-2.0 multimodal model that accepts text and multiple images. Its native output is text, not robot actions.
+- **Why this candidate:** it is the smallest of the considered candidates and has the simplest path to a laptop-sized prototype. [SmolVLM2-2.2B](https://huggingface.co/HuggingFaceTB/SmolVLM2-2.2B-Instruct) offers more capacity at higher compute cost; [Qwen3-VL-2B](https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct) is another option, but its current model card expects a newer Transformers stack. Reconsider those alternatives only if the 500M prototype cannot ground T3-L instructions.
+- **Prototype policy:** freeze the VLM, use its supported image/text representation from both cameras, combine it with the 12-D proprioceptive state, and train a small MLP action head on T3-L demonstrations. The head predicts one absolute 5-D action per policy step; SmolVLA remains the primary VLA model and uses its own action-chunk interface.
+- **Compatibility status:** the exact Transformers feature interface and MPS memory/throughput have not been verified in this repository's pinned environment. Pin a compatible Transformers version and verify these in the Phase 3.1 feasibility step before implementation; do not extrapolate the model card's inference examples to MPS training.
+
 ## RL expert and dataset design
 
 - Train one pure-PPO policy from scratch per non-language task (T1-T4) on privileged state. A task's best qualifying checkpoint is the primary demonstrator for Phase 2 datasets and the privileged teacher for distillation.

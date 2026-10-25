@@ -1,6 +1,6 @@
 # Robot Foundation Models Testbed
 
-A simulated robot arm used as a controlled testbed for robot foundation models: a fine-tuned vision-language-action (VLA) model, JEPA representations, latent world models with calibrated uncertainty, and distillation into small, fast policies. A scripted expert and a reinforcement-learning expert provide the data and the baselines, and every model is benchmarked on the same tasks and seeds.
+A simulated robot arm used as a controlled testbed for robot foundation models: a basic VLA prototype built from a pretrained vision-language model, SmolVLA fine-tuning, JEPA representations, latent world models with calibrated uncertainty, and distillation into small, fast policies. A scripted expert and a reinforcement-learning expert provide the data and baselines; benchmarked methods share tasks and seeds, while the basic VLA prototype is initially an exploratory Phase 3 result.
 
 ---
 
@@ -8,7 +8,7 @@ A simulated robot arm used as a controlled testbed for robot foundation models: 
 
 **Motivation.** Robot foundation models are usually demonstrated one at a time, on different robots and tasks, with results that are hard to compare. This project builds them side by side in one simulator, where ground truth is available for everything: object poses for probing representations, the simulator itself as a physics-based model to benchmark learned world models against, and exact success predicates for every evaluation.
 
-**Focus.** VLA fine-tuning, self-supervised visual representations (JEPA), action-conditioned latent world models (prediction, uncertainty, out-of-distribution detection, planning, and policy evaluation), and distillation with efficient inference. The project contains no kinematics, dynamics, or control code. An off-the-shelf IK library (`mink`) maps end-effector targets to joint targets, and MuJoCo's position servos track them.
+**Focus.** A small educational VLA prototype built from a frozen pretrained VLM, SmolVLA fine-tuning, self-supervised visual representations (JEPA), action-conditioned latent world models (prediction, uncertainty, out-of-distribution detection, planning, and policy evaluation), and distillation with efficient inference. The project contains no kinematics, dynamics, or control code. An off-the-shelf IK library (`mink`) maps end-effector targets to joint targets, and MuJoCo's position servos track them.
 
 **Reference hardware.** A single Apple Silicon laptop (M3 Max, 36 GB unified memory). No robot and no NVIDIA GPU are used; every model is sized to train on this machine, and the training code is distributed-ready for larger hardware.
 
@@ -19,7 +19,7 @@ A simulated robot arm used as a controlled testbed for robot foundation models: 
 | Simulation environment | Phases 0-1: MuJoCo scene, Gymnasium environment, and a scripted expert built on off-the-shelf IK |
 | Reinforcement learning | Phase 1b: PPO trained from scratch into a privileged-state expert, the demonstrator and distillation teacher |
 | Data engine | Phase 2: versioned LeRobot datasets with language labels, an interaction corpus for world models, and shared training infrastructure |
-| Vision-language-action models | Phase 3: SmolVLA fine-tuned on the RL expert's demonstrations and evaluated under distribution and dynamics shift |
+| Vision-language-action models | Phase 3: a frozen SmolVLM2-500M with a learned action head, followed by SmolVLA fine-tuning and evaluation under distribution and dynamics shift |
 | Representations and JEPA | Phase 4: ResNet-18, DINOv2, V-JEPA 2, and an in-domain JEPA compared by probing and as policy backbones |
 | World models | Phase 5: latent dynamics ensembles with calibrated uncertainty and OOD signals, a validity map, physics-based baselines, CEM planning, and policy evaluation in imagination |
 | Distillation and inference | Phase 6: privileged-teacher and VLA-teacher distillation with DAgger, flow-step reduction, and ONNX latency benchmarks |
@@ -40,7 +40,7 @@ A simulated robot arm used as a controlled testbed for robot foundation models: 
 6. A demo video (about 2 minutes): a typed instruction, the plan, the world model's imagined rollout next to the real execution, and one real failure with its recovery.
 7. A technical write-up (README plus report) with ablations and a limitations section.
 
-**Non-goals.** Real hardware, sim-to-real transfer, novel algorithms, a production system, collision-aware motion planning beyond simple approach and retreat waypoints, implementing kinematics, dynamics, or controllers, training VLAs or large world models from scratch, and multi-GPU training at scale.
+**Non-goals.** Real hardware, sim-to-real transfer, novel algorithms, a production system, collision-aware motion planning beyond simple approach and retreat waypoints, implementing kinematics, dynamics, or controllers, pretraining VLMs or training large VLAs and world models from scratch, and multi-GPU training at scale. The Phase 3 prototype freezes a pretrained small VLM and trains only a supervised action head.
 
 ---
 
@@ -79,7 +79,7 @@ Also add a **TCP site** between the fingertips. That site is the `ee` frame.
 - **Phase 1b RL policy action:** a bounded delta from the controller's current TCP target (xyz up to one 1.25 cm rate-limit step, yaw up to 0.05 rad) plus a binary gripper. The RL wrapper, and the frozen policy's `Policy.act`, integrate it into the absolute action above. Deltas make holding still and millimeter precision closed-loop and keep exploration local, whereas absolute targets leave both open-loop and dominated by exploration noise.
 - **Image-policy observation:** front RGB plus wrist RGB at 256×256 for every dataset from Phase 2 on (the earlier BC baselines use 128×128), plus proprioception (joint positions, TCP pose, gripper width). Pretrained encoders (DINOv2, V-JEPA 2) and SmolVLA expect 224-256 px inputs, and the cubes span only a few pixels at 128 px in the front view.
 - **State-policy observation:** proprioception, object poses (noisy under T2-H), target pose, and gripper state.
-- The BC baselines and the students distilled from the RL expert are **not** language-conditioned, so object identities that define a task are fixed by color for them (T4: red on blue). SmolVLA and its distilled student (T3-L) and the agent (T5) handle language references.
+- The BC baselines and the students distilled from the RL expert are **not** language-conditioned, so object identities that define a task are fixed by color for them (T4: red on blue). The basic VLA prototype and SmolVLA use language on T3-L; SmolVLA, its distilled student, and the agent handle the later language-conditioned tasks.
 
 ### 3.5 Conventions (fix on day one, in `docs/conventions.md`)
 
@@ -98,7 +98,7 @@ Five layers. Each one runs on its own and is evaluated on its own. The architect
 1. **Physics and robot.** A MuJoCo scene, built with `MjSpec`, containing the Panda, a table, colored cubes, a bowl, a front camera, and a wrist camera.
 2. **Motion and skills.** Off-the-shelf IK (`mink`) and MuJoCo's position servos, wrapped as parameterized skills and a scripted expert.
 3. **Experts and data.** A PPO expert trained on privileged state, and a data engine that turns it into versioned demonstration datasets and an interaction corpus.
-4. **Learned models.** SmolVLA; frozen and in-domain JEPA encoders with probes; latent world models with uncertainty, planning, and policy evaluation; and distilled students. Every policy shares one action interface.
+4. **Learned models.** A basic VLA prototype and SmolVLA; frozen and in-domain JEPA encoders with probes; latent world models with uncertainty, planning, and policy evaluation; and distilled students. Every policy shares one action interface.
 5. **Agent.** An LLM planner emits a JSON plan of skill calls, executed by scripted skills or SmolVLA. A verifier checks each result, and the world model predicts each skill's outcome before it runs.
 
 ---
@@ -163,6 +163,7 @@ The perturbations are calibrated against the frozen T2 RL expert: 95/200 success
 | --- | --- | --- |
 | Physics, scripted evaluation, data generation | CPU, multiprocess | minutes to about an hour per batch |
 | State-based PPO | CPU, 8-10 processes | hours per run, capped at 2 days |
+| Basic VLA prototype (frozen VLM, trained action head) | MPS | short feasibility run; memory and throughput to be measured in Phase 3.1 |
 | SmolVLA fine-tune | MPS (LoRA preset if full fine-tuning does not fit) | up to about a day per run |
 | Encoder feature caching (DINOv2, V-JEPA 2) | MPS | hours per dataset version |
 | In-domain JEPA and world-model ensembles | MPS | hours per model |
@@ -248,13 +249,16 @@ The scripted expert remains in the benchmark as a comparison baseline and as a f
 
 **Exit criteria.** The datasets and corpus exist with manifests and versions, T2-H is frozen, and the training utilities train identically in 1- and 2-process runs and resume exactly.
 
-### Phase 3: VLA fine-tuning
+### Phase 3: VLA prototype and fine-tuning
 
-**Build.** Fine-tune SmolVLA (LeRobot, from the pretrained base checkpoint) on T2, T3, and T3-L with the two 256 px cameras and the 5-D action. Measure MPS throughput with short runs first and choose full fine-tuning or the LoRA preset so a run fits in about a day. Check that the saved checkpoint's feature config matches the dataset, and profile inference latency and flow-matching steps.
+**Build.**
 
-**Experiments.** SmolVLA vs the RL expert and the BC baseline on T2-L1 and T3-L1; train on L1 and test on L2 (lighting, textures, distractors); dynamics shift on T2-H; language grounding on T3-L (success and wrong-object rate) on train and held-out paraphrases.
+- **Basic VLA prototype:** freeze the open SmolVLM2-500M checkpoint and train a small action head on T3-L demonstration data. The inputs are both camera views, proprioception, and the instruction; the head predicts one shared 5-D action per policy step. This prototype teaches the VLM-to-action connection and does not replace SmolVLA.
+- **SmolVLA:** run a feasibility test on MPS, then fine-tune the pretrained base on T2, T3, and T3-L with the two 256 px cameras and the shared 5-D action. Choose full fine-tuning or LoRA so a run fits in about a day, and profile inference latency and flow-matching steps.
 
-**Exit criteria.** SmolVLA results on T2-L1, T3-L1, T2-L2, T2-H, and T3-L with confidence intervals and the wrong-object rate.
+**Experiments.** Record the basic VLA prototype's T3-L success, wrong-object rate, and latency as an exploratory result. Compare SmolVLA with the RL expert and BC baseline on T2-L1 and T3-L1; train on L1 and test on L2; evaluate T2-H dynamics shift; and measure SmolVLA language grounding on T3-L train and held-out paraphrases.
+
+**Exit criteria.** The prototype's exploratory T3-L result is recorded; SmolVLA results on T2-L1, T3-L1, T2-L2, T2-H, and T3-L have confidence intervals and the wrong-object rate.
 
 ### Phase 4: Representations and JEPA
 

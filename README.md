@@ -1,6 +1,6 @@
 # Blindspot
 
-A simulated Franka Panda arm used as a testbed for robot foundation models. A MuJoCo scene, a scripted expert, and a reinforcement-learning expert provide data and baselines for a fine-tuned vision-language-action model (SmolVLA), JEPA representations, latent world models with calibrated uncertainty, and distilled policies, all benchmarked on the same tasks and seeds. See [the project idea](docs/idea.md) and [the roadmap](docs/roadmap.md).
+A simulated Franka Panda arm used as a testbed for robot foundation models. A MuJoCo scene, a scripted expert, and a reinforcement-learning expert provide data and baselines for an exploratory small VLA prototype, a fine-tuned vision-language-action model (SmolVLA), JEPA representations, latent world models with calibrated uncertainty, and distilled policies. The benchmark compares supported methods on shared tasks and seeds. See [the project idea](docs/idea.md) and [the roadmap](docs/roadmap.md).
 
 ## Setup
 

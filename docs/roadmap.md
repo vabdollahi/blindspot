@@ -5,7 +5,7 @@ This is a step-by-step build plan. The project is a simulated Franka Panda arm i
 1. A MuJoCo environment and a scripted expert (off-the-shelf IK, no custom kinematics or control code)
 2. Reinforcement learning (PPO) trained from scratch into a privileged-state expert and demonstrator
 3. A data engine: versioned demonstration datasets with language labels, and an interaction corpus for world models
-4. A fine-tuned vision-language-action model (SmolVLA)
+4. A small VLA prototype built on a pretrained open VLM, followed by a fine-tuned SmolVLA
 5. Visual representations: pretrained (DINOv2, V-JEPA 2) and in-domain JEPA encoders, compared by probing and as policy backbones
 6. Latent world models with calibrated uncertainty, benchmarked against physics-based models, and used for planning and policy evaluation
 7. Distillation of large and privileged teachers into small, fast students, with measured inference latency
@@ -27,7 +27,7 @@ Work through the phases in order. Every step ends with a **Check** that must pas
 8. [Phase 1: Environment and scripted expert](#phase-1-environment-and-scripted-expert)
 9. [Phase 1b: Reinforcement learning (training an RL expert)](#phase-1b-reinforcement-learning-training-an-rl-expert)
 10. [Phase 2: Data engine](#phase-2-data-engine)
-11. [Phase 3: VLA fine-tuning](#phase-3-vla-fine-tuning)
+11. [Phase 3: VLA prototype and fine-tuning](#phase-3-vla-prototype-and-fine-tuning)
 12. [Phase 4: Representations and JEPA](#phase-4-representations-and-jepa)
 13. [Phase 5: Latent world models](#phase-5-latent-world-models)
 14. [Phase 6: Distillation and efficient inference](#phase-6-distillation-and-efficient-inference)
@@ -54,7 +54,7 @@ The project is complete when all of the following exist:
 
 **Reference hardware.** One Apple Silicon laptop (M3 Max, 36 GB of unified memory). No NVIDIA GPU is used; every model is sized to train on this machine.
 
-**Non-goals.** Real hardware, sim-to-real transfer, implementing kinematics, dynamics, or controllers, collision-aware motion planning, training VLAs or large world models from scratch, multi-GPU training at scale (the training code is distributed-ready but runs on one machine), and novel algorithms.
+**Non-goals.** Real hardware, sim-to-real transfer, implementing kinematics, dynamics, or controllers, collision-aware motion planning, pretraining VLMs or training large VLAs and world models from scratch, multi-GPU training at scale (the training code is distributed-ready but runs on one machine), and novel algorithms. Phase 3 includes a small supervised action head on a frozen pretrained VLM as a learning prototype; it does not train the VLM itself.
 
 ---
 
@@ -64,14 +64,17 @@ The project is complete when all of the following exist:
 flowchart TB
     PH[MuJoCo physics: Panda, table, cubes, bowl, front and wrist cameras] --> DE[Data engine: demonstrations, language labels, interaction corpus]
     RL[RL expert: PPO on privileged state] --> DE
+    DE --> BASICVLA[Basic VLA: pretrained SmolVLM2 plus action head]
     DE --> VLA[SmolVLA fine-tune]
+    U[Natural-language instruction] --> BASICVLA
+    BASICVLA --> CT
     DE --> ENC[Encoders: ResNet-18, DINOv2, V-JEPA 2, in-domain JEPA]
     ENC --> WM[Latent world-model ensemble: state and success readouts, uncertainty]
     WM --> PLN[CEM planner]
     WM --> PE[Policy evaluation in imagination]
     VLA --> ST[Distilled students, ONNX inference]
     RL --> ST
-    U[Natural-language instruction] --> AG[LLM planner and verifier]
+    U --> AG[LLM planner and verifier]
     AG --> EX[Skill executors: scripted or SmolVLA]
     WM -. look-ahead .-> AG
     EX --> CT[Motion: mink IK and position servos]
@@ -85,7 +88,7 @@ There are five layers, each usable and testable on its own:
 1. **Physics:** a MuJoCo scene with the Panda, a table, colored cubes, a bowl, target zones, and two cameras.
 2. **Motion and skills:** off-the-shelf IK (`mink`), MuJoCo's position servos, parameterized skills, and the scripted expert. No kinematics or control code is written.
 3. **Experts and data:** the RL expert, trained on privileged state, and the data engine that turns it into versioned datasets.
-4. **Learned models:** SmolVLA, encoders and probes, latent world models with planning and policy evaluation, and distilled students, all policies sharing one action interface.
+4. **Learned models:** a basic VLA prototype and SmolVLA, encoders and probes, latent world models with planning and policy evaluation, and distilled students, all policies sharing one action interface.
 5. **Agent:** an LLM planner, a verifier with recovery, and skill executors (scripted or SmolVLA), with world-model look-ahead before each skill.
 
 ---
@@ -556,11 +559,20 @@ The common run record captures the config, git commit and dirty-worktree status,
 
 ---
 
-## Phase 3: VLA fine-tuning
+## Phase 3: VLA prototype and fine-tuning
 
-**Goal:** a fine-tuned SmolVLA, trained on the laptop, compared with the RL expert and the existing baselines, and evaluated on language-conditioned tasks and under distribution and dynamics shift.
+**Goal:** first build a small, understandable VLA from an existing open VLM; then fine-tune SmolVLA and compare it with the prototype, RL expert, and existing baselines on language-conditioned tasks and under distribution and dynamics shift. The prototype is a learning baseline, not a replacement for SmolVLA.
 
-### 3.1 Setup and feasibility
+### 3.1 Basic VLA prototype from a pretrained small VLM
+
+- Start from the frozen `HuggingFaceTB/SmolVLM2-500M-Video-Instruct` checkpoint (about 500M parameters, Apache-2.0; see the model card linked in `docs/decisions.md`). Do not train the VLM itself.
+- Use the supported image/text representation from both 256 × 256 cameras and the T3-L instruction, combine it with the 12-D `observation.state`, and train a small MLP action head on the T3-L training demonstrations. The head predicts one absolute 5-D `[x, y, z, yaw, g]` action per 20 Hz policy step; keep the VLM frozen for this first prototype.
+- Use the clean `action` label, and wrap the result in the shared `Policy` interface. Pin a Transformers version compatible with this checkpoint and the project's PyTorch/LeRobot environment before building the adapter; do not assume that the model card's inference examples establish MPS support.
+- Run a short MPS feasibility test and a T3-L smoke rollout with different color instructions. Keep the train templates for fitting and use a held-out template for the instruction-following check.
+
+**Check:** the VLM loads on the reference laptop, the action head trains with decreasing action loss, it emits finite in-range 5-D actions through `Policy`, and its behavior responds to the requested cube color. Record memory, steps per second, and the selected model revision in `docs/decisions.md`. This is a small integration/learning prototype, not a reportable benchmark result; any reportable success rate still follows §5.
+
+### 3.2 SmolVLA setup and feasibility
 
 - Install the pinned `lerobot` with its SmolVLA extra and load `lerobot/smolvla_base`. Map the two 256 px cameras, the 12-D state, and the 5-D action to the policy's input and output features.
 - After the first save, check the checkpoint's `config.json`: its input and output features must match the dataset, not the base model's.
@@ -568,7 +580,7 @@ The common run record captures the config, git commit and dirty-worktree status,
 
 **Check:** a 200-step run trains with a decreasing loss, and the saved config matches the dataset features.
 
-### 3.2 Fine-tune
+### 3.3 Fine-tune SmolVLA
 
 - Fine-tune on T2, T3, and T3-L together with the LeRobot training CLI.
 - Wrap the checkpoint in the `Policy` interface with LeRobot's own pre- and post-processing, passing the instruction as the task string and calling `reset()` at episode start.
@@ -576,14 +588,15 @@ The common run record captures the config, git commit and dirty-worktree status,
 
 **Check:** the policy completes T2 episodes in simulation, and its behavior changes with the instruction on T3-L scenes.
 
-### 3.3 Experiments
+### 3.4 Experiments
 
+- **Basic VLA prototype:** record its T3-L success, wrong-object rate, and inference latency as an exploratory result; compare against the SmolVLA and image-BC results where their task support overlaps.
 - **SmolVLA vs the RL expert** (privileged state) and the existing image BC baseline on T2-L1 and T3-L1.
 - **Distribution shift:** train on L1, evaluate on L2 (lighting, textures, distractors, camera jitter).
 - **Dynamics shift:** evaluate on T2-H.
 - **Language grounding on T3-L:** success rate and **wrong-object rate** (a cube other than the named one moved more than 2 cm or ended in the bowl), on train and held-out paraphrases.
 
-**Done when:** SmolVLA results on T2-L1, T3-L1, T2-L2, T2-H, and T3-L, with confidence intervals and the wrong-object rate, are generated by `make report`.
+**Done when:** the basic VLA prototype's exploratory T3-L result is recorded, and SmolVLA results on T2-L1, T3-L1, T2-L2, T2-H, and T3-L, with confidence intervals and the wrong-object rate, are generated by `make report`.
 
 ---
 
