@@ -90,6 +90,12 @@ def _parse_args() -> argparse.Namespace:
         help="SmolVLM2 decoder layer whose hidden states feed the action head.",
     )
     parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=10,
+        help="Future actions predicted per query (10 = 0.5 s at 20 Hz; 1 = single step).",
+    )
+    parser.add_argument(
         "--feature-cache-dir",
         type=Path,
         help="Reuse or store frozen-VLM features here, keyed by data and encoder.",
@@ -233,6 +239,8 @@ def _validate_resume_record(
         raise ValueError("Warm-start profile does not match the run")
     if record.config.model_id != config.model_id:
         raise ValueError("Warm-start model ID does not match the run")
+    if record.config.chunk_size != config.chunk_size:
+        raise ValueError("Warm-start chunk size does not match the run")
     if config.model_revision not in {
         record.config.model_revision,
         record.result.encoding.model_revision,
@@ -255,6 +263,7 @@ def main() -> None:
         model_revision=arguments.model_revision,
         profile=arguments.profile,
         feature_layer=arguments.feature_layer,
+        chunk_size=arguments.chunk_size,
         epochs=arguments.epochs,
         batch_size=arguments.batch_size,
         encoding_batch_size=arguments.encoding_batch_size,
@@ -414,6 +423,7 @@ def main() -> None:
             training_profile=config.profile,
             hidden_size=encoder.hidden_size,
             feature_layer=config.feature_layer,
+            chunk_size=config.chunk_size,
         )
         if head_source is not None
         else None
@@ -555,6 +565,11 @@ def main() -> None:
                         result.ablated_validation_action_mae
                         if improved
                         else previous_run.result.ablated_validation_action_mae
+                    ),
+                    "validation_chunk_l1": (
+                        result.validation_chunk_l1
+                        if improved
+                        else previous_run.result.validation_chunk_l1
                     ),
                     "gripper_positive_weight": result.gripper_positive_weight,
                 }

@@ -31,6 +31,17 @@ def main() -> None:
         help="Maximum evaluation seeds to scan for limited-scope episodes.",
     )
     parser.add_argument("--device", default="auto")
+    parser.add_argument(
+        "--replan-interval",
+        type=int,
+        help="Steps between VLM queries for chunked heads (default: 2).",
+    )
+    parser.add_argument(
+        "--ensemble-decay",
+        type=float,
+        default=0.0,
+        help="Weight exp(-decay * age) for overlapping plans; 0 averages them equally.",
+    )
     parser.add_argument("--results-dir", type=Path)
     parser.add_argument("--trajectories-dir", type=Path)
     arguments = parser.parse_args()
@@ -49,7 +60,12 @@ def main() -> None:
         parser.error("--trajectories-dir is available only with --scope limited")
 
     checkpoint = arguments.checkpoint.expanduser().resolve()
-    policy = load_vla_policy(checkpoint, device=arguments.device)
+    policy = load_vla_policy(
+        checkpoint,
+        device=arguments.device,
+        replan_interval=arguments.replan_interval,
+        ensemble_decay=arguments.ensemble_decay,
+    )
     if arguments.scope == "limited":
         if policy.training_profile != "limited":
             parser.error("--scope limited requires a limited-profile checkpoint")
@@ -78,6 +94,11 @@ def main() -> None:
             if policy.training_profile == "limited"
             else "vla-prototype"
         )
+        if policy.chunk_size > 1:
+            method += (
+                f"-chunk{policy.chunk_size}-replan{policy.replan_interval}"
+                f"-decay{policy.ensemble_decay:g}"
+            )
         result = evaluate(
             policy,
             "T3-L",

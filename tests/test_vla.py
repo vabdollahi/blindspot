@@ -61,6 +61,15 @@ class SyntheticVLADataset(torch.utils.data.Dataset):
             "episode_index": self.episodes[index],
         }
 
+    def action_chunks(self, chunk_size: int):
+        """Return each transition's next actions within its synthetic episode."""
+        return vla.action_chunk_labels(
+            self.actions.numpy(),
+            self.episodes.numpy(),
+            np.arange(len(self)),
+            chunk_size,
+        )
+
 
 class FakeEncoder:
     """Provide deterministic token-grid features without downloading a VLM."""
@@ -193,7 +202,10 @@ class FakeNumericRows:
         return len(self.rows)
 
     def __getitem__(self, index):
-        """Return one numeric row."""
+        """Return one row, or columns like a sliced Hugging Face dataset."""
+        if isinstance(index, slice):
+            rows = self.rows[index]
+            return {name: np.stack([row[name] for row in rows]) for name in rows[0]}
         return self.rows[index]
 
 
@@ -378,8 +390,8 @@ def test_vla_head_normalizes_inputs_and_residual_targets_from_training_data() ->
     deltas = dataset.actions[:, :4] - dataset.states[:, 8:12]
 
     assert torch.allclose(head.state_mean, dataset.states.mean(dim=0))
-    assert torch.allclose(head.delta_mean, deltas.mean(dim=0))
-    assert torch.allclose(head.delta_std, deltas.std(dim=0, unbiased=False))
+    assert torch.allclose(head.delta_mean[0], deltas.mean(dim=0))
+    assert torch.allclose(head.delta_std[0], deltas.std(dim=0, unbiased=False))
     assert torch.allclose(head.context_mean, torch.tensor([0.5, 0.5, 0.5, 0.25]))
     assert torch.all(head.context_std >= 1e-3)
 
@@ -738,6 +750,7 @@ def test_load_vla_training_head_checks_checkpoint_identity(tmp_path) -> None:
         "training_profile": "limited",
         "hidden_size": encoder.hidden_size,
         "feature_layer": vla.DEFAULT_FEATURE_LAYER,
+        "chunk_size": 1,
     }
 
     loaded = vla.load_vla_training_head(checkpoint, **identity)
@@ -752,3 +765,186 @@ def test_load_vla_training_head_checks_checkpoint_identity(tmp_path) -> None:
         )
     with pytest.raises(ValueError, match="feature layer"):
         vla.load_vla_training_head(checkpoint, **{**identity, "feature_layer": 8})
+    with pytest.raises(ValueError, match="chunk size"):
+        vla.load_vla_training_head(checkpoint, **{**identity, "chunk_size": 10})
+
+
+def _constant_head(chunk_size: int, bias: list[float]) -> object:
+    """Return a head whose raw output is the given bias for every input."""
+    head = vla.VLAActionHead(HIDDEN_SIZE, IMAGE_TOKENS, chunk_size=chunk_size)
+    with torch.no_grad():
+        for parameter in head.parameters():
+            parameter.zero_()
+        head.layers[-1].bias.copy_(torch.tensor(bias))
+    return head
+
+
+def _chunk_policy(head, encoder, **options) -> object:
+    """Bind a chunked head and fake encoder into the shared policy adapter."""
+    return vla.VLAActionPolicy(
+        head,
+        encoder,
+        model_id=encoder.model_id,
+        model_revision=encoder.model_revision,
+        head_state=head.state_dict(),
+        image_tokens=head.image_tokens,
+        chunk_size=head.chunk_size,
+        device="cpu",
+        **options,
+    )
+
+
+def _tcp_state(x: float) -> np.ndarray:
+    """Return a robot state whose TCP is at x = ``x`` with zero y, z, and yaw."""
+    state = np.zeros(12, dtype=np.float32)
+    state[8] = x
+    return state
+
+
+def test_action_chunk_labels_stay_within_each_episode() -> None:
+    """Repeat an episode's last action past its end and mask those positions."""
+    actions = np.arange(7, dtype=np.float32)[:, None].repeat(5, axis=1)
+    episodes = np.array([0, 0, 0, 1, 1, 1, 1])
+
+    chunks, mask = vla.action_chunk_labels(actions, episodes, np.array([1, 2, 5]), 3)
+
+    assert chunks[:, :, 0].tolist() == [[1, 2, 2], [2, 2, 2], [5, 6, 6]]
+    assert mask.tolist() == [
+        [True, True, False],
+        [True, False, False],
+        [True, True, False],
+    ]
+
+
+def test_vla_frame_dataset_returns_action_chunks_for_selected_frames() -> None:
+    """Read future labels from the LeRobot numeric columns without decoding images."""
+    dataset = vla.VLAFrameDataset(FakeLeRobotDataset(), frame_indices=[0])
+
+    chunks, mask = dataset.action_chunks(2)
+
+    assert torch.equal(chunks, torch.zeros(1, 2, 5))
+    assert mask.tolist() == [[True, False]]
+
+
+def test_encoded_dataset_rejects_chunks_that_do_not_start_at_its_actions() -> None:
+    """Catch feature rows and chunk labels that come from different frames."""
+    encoded = vla.EncodedVLADataset(
+        torch.zeros(2, 2, IMAGE_TOKENS, HIDDEN_SIZE),
+        torch.zeros(2, HIDDEN_SIZE),
+        torch.zeros(2, 12),
+        torch.zeros(2, 5),
+        torch.zeros(2, dtype=torch.int64),
+    )
+
+    with pytest.raises(ValueError, match="do not start"):
+        encoded.with_action_chunks(torch.ones(2, 3, 5), torch.ones(2, 3, dtype=bool))
+
+
+def test_chunked_vla_training_reduces_loss_and_records_chunk_error() -> None:
+    """Train a multi-step head with per-position residual statistics."""
+    dataset = SyntheticVLADataset()
+
+    head, result, _ = vla.train_vla(
+        dataset,
+        dataset,
+        _training_config(chunk_size=3),
+        encoder=FakeEncoder(),
+    )
+
+    assert head.chunk_size == 3
+    assert head.delta_mean.shape == (3, 4)
+    assert result.best_validation_loss < result.initial_validation_loss
+    assert result.validation_chunk_l1 is not None
+    assert result.validation_chunk_l1 > 0.0
+
+
+def test_chunked_policy_blends_overlapping_plans() -> None:
+    """Average every plan covering a step, weighted by the plan's age."""
+    head = _constant_head(2, [0.01, 0, 0, 0, 0.02, 0, 0, 0, 3.0, -1.0])
+    encoder = FakeEncoder()
+    policy = _chunk_policy(head, encoder, replan_interval=1)
+    policy.reset("Place the red cube.")
+
+    first = policy.act(_observation(_tcp_state(0.5)))
+    second = policy.act(_observation(_tcp_state(0.6)))
+
+    assert encoder.calls == 2
+    assert first[0] == pytest.approx(0.51)
+    assert first[4] == 1.0
+    # Plan from step 0 at age 1 (x = 0.52) and plan from step 1 at age 0 (0.61).
+    assert second[0] == pytest.approx(0.565)
+    decayed = _chunk_policy(
+        head, FakeEncoder(), replan_interval=1, ensemble_decay=float(np.log(3.0))
+    )
+    decayed.reset("Place the red cube.")
+    decayed.act(_observation(_tcp_state(0.5)))
+    assert decayed.act(_observation(_tcp_state(0.6)))[0] == pytest.approx(0.5875)
+
+
+def test_chunked_policy_queries_the_vlm_every_replan_interval() -> None:
+    """Run the frozen VLM only on re-planning steps and restart at reset."""
+    head = _constant_head(4, [0.0] * 16 + [-2.0] * 4)
+    encoder = FakeEncoder()
+    policy = _chunk_policy(head, encoder, replan_interval=2)
+    policy.reset("Place the blue cube.")
+
+    actions = [policy.act(_observation(_tcp_state(0.5))) for _ in range(6)]
+    calls_after_episode = encoder.calls
+    policy.reset("Place the red cube.")
+    policy.act(_observation(_tcp_state(0.5)))
+
+    assert calls_after_episode == 3
+    assert encoder.calls == 4
+    assert all(action[4] == 0.0 for action in actions)
+    assert _chunk_policy(head, FakeEncoder()).replan_interval == 2
+    with pytest.raises(ValueError, match="replan_interval"):
+        _chunk_policy(head, FakeEncoder(), replan_interval=5)
+
+
+def test_single_step_checkpoints_load_as_chunk_size_one(tmp_path, monkeypatch) -> None:
+    """Keep format-3 single-step heads loadable for comparison."""
+    head = _constant_head(1, [0.01, 0.0, 0.0, 0.0, 2.0])
+    state_dict = {name: value.clone() for name, value in head.state_dict().items()}
+    state_dict["delta_mean"] = state_dict["delta_mean"].reshape(4)
+    state_dict["delta_std"] = state_dict["delta_std"].reshape(4)
+    checkpoint = tmp_path / "single-step.pt"
+    torch.save(
+        {
+            "format_version": 3,
+            "model_id": "test/smolvlm",
+            "model_revision": "test-revision",
+            "training_profile": "limited",
+            "feature_layer": vla.DEFAULT_FEATURE_LAYER,
+            "hidden_size": HIDDEN_SIZE,
+            "image_tokens": IMAGE_TOKENS,
+            "state_dict": state_dict,
+        },
+        checkpoint,
+    )
+    encoder = FakeEncoder()
+    monkeypatch.setattr(
+        vla,
+        "load_frozen_smolvlm",
+        lambda model_id, revision, *, device, feature_layer: encoder,
+    )
+
+    policy = vla.load_vla_policy(checkpoint, device="cpu")
+    policy.reset("Place the red cube.")
+
+    assert policy.chunk_size == 1
+    assert policy.replan_interval == 1
+    assert policy.act(_observation(_tcp_state(0.5)))[0] == pytest.approx(0.51)
+
+
+def test_chunked_checkpoint_round_trip_preserves_chunk_size(tmp_path) -> None:
+    """Store the chunk size with the head and restore it for inference."""
+    head = vla.VLAActionHead(HIDDEN_SIZE, IMAGE_TOKENS, chunk_size=10)
+    checkpoint = vla.save_vla_checkpoint(
+        head, "test/smolvlm", "test-revision", tmp_path / "chunked.pt"
+    )
+
+    policy = vla.load_vla_policy(checkpoint, device="cpu", ensemble_decay=0.5)
+
+    assert policy.chunk_size == 10
+    assert policy.replan_interval == 2
+    assert policy.ensemble_decay == 0.5

@@ -55,6 +55,9 @@ class FakePolicy:
     model_id = "test/smolvlm"
     model_revision = "test-revision"
     training_profile = "limited"
+    chunk_size = 1
+    replan_interval = 1
+    ensemble_decay = 0.0
 
     def reset(self, instruction: str | None = None) -> None:
         """Accept the episode instruction."""

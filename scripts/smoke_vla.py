@@ -118,6 +118,17 @@ def main() -> None:
     parser.add_argument("--seed-start", type=int, default=_VALIDATION_SEED_START)
     parser.add_argument("--max-seeds", type=int, default=256)
     parser.add_argument("--device", default="auto")
+    parser.add_argument(
+        "--replan-interval",
+        type=int,
+        help="Steps between VLM queries for chunked heads (default: 2).",
+    )
+    parser.add_argument(
+        "--ensemble-decay",
+        type=float,
+        default=0.0,
+        help="Weight exp(-decay * age) for overlapping plans; 0 averages them equally.",
+    )
     arguments = parser.parse_args()
     if arguments.max_seeds < 2:
         parser.error("--max-seeds must be at least 2")
@@ -130,7 +141,12 @@ def main() -> None:
     if not templates:
         raise ValueError("T3-L has no held-out instruction templates")
 
-    policy = load_vla_policy(arguments.checkpoint, device=arguments.device)
+    policy = load_vla_policy(
+        arguments.checkpoint,
+        device=arguments.device,
+        replan_interval=arguments.replan_interval,
+        ensemble_decay=arguments.ensemble_decay,
+    )
     profile = (
         policy.training_profile
         if arguments.profile == "checkpoint"

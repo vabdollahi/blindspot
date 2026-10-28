@@ -44,14 +44,15 @@ Open the local URL printed by TensorBoard (usually `http://localhost:6006`). Sto
 ## Frozen-backbone VLA baseline (Phase 3.1)
 
 A language-conditioned T3-L policy that reads frozen SmolVLM2-500M image-token
-features and trains only a 0.38 M-parameter action head. Architecture, data
-selection, training, evaluation, and replay are documented in
-[docs/vla-baseline.md](docs/vla-baseline.md); design rationale and ablations
-are in [docs/decisions.md](docs/decisions.md#frozen-backbone-vla-baseline).
+features and trains only a 0.39 M-parameter action head that predicts 0.5 s
+action chunks. Architecture, data selection, training, evaluation, and replay
+are documented in [docs/vla-baseline.md](docs/vla-baseline.md); design
+rationale and ablations are in
+[docs/decisions.md](docs/decisions.md#frozen-backbone-vla-baseline).
 
-![Frozen-backbone VLA placing the named red cube in the bowl beside a green cube (T3-L1, evaluation seed 1,000,005)](docs/media/t3l-l1-vla-limited.gif)
+![Frozen-backbone VLA placing the named red cube in the bowl beside a blue cube (T3-L1, evaluation seed 1,000,011)](docs/media/t3l-l1-vla-chunk.gif)
 
-*Frozen-backbone VLA (limited red/blue profile) on evaluation seed 1,000,005 with the instruction "Place the red cube inside the bowl." and a green cube on the table. From the camera images, instruction, and robot state alone (no object poses), the policy picks the named cube, carries it to the bowl, and releases it. This is a successful episode from the limited-scope diagnostic evaluation; closed-loop grasp timing remains the main failure mode (see [Limitations](docs/vla-baseline.md#limitations)).*
+*Frozen-backbone VLA with 10-step action chunks (limited red/blue profile) on evaluation seed 1,000,011, with the instruction "Place the red cube inside the bowl." and a blue cube on the table. From the camera images, instruction, and robot state alone (no object poses), the policy picks the named cube, carries it to the bowl, and releases it, leaving the blue cube untouched. This is a successful episode from the limited-scope diagnostic evaluation; grasp completion remains the main failure mode (see [Limitations](docs/vla-baseline.md#limitations)).*
 
 ## Evaluation
 

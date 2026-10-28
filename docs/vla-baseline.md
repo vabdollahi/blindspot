@@ -2,8 +2,9 @@
 
 A language-conditioned pick-and-place policy built on a frozen, pretrained
 vision-language model. SmolVLM2-500M encodes the instruction and both camera
-images. A 0.38 M-parameter action head, the only trained component, maps those
-features and the robot state to the shared 5-D action at 20 Hz. The baseline
+images. A 0.39 M-parameter action head, the only trained component, maps those
+features and the robot state to a 0.5 s chunk of future actions, which the
+policy blends into the shared 5-D action at 20 Hz. The baseline
 measures how far frozen VLM features go toward closed-loop control without
 fine-tuning the VLM; SmolVLA (Phase 3.2–3.3) is the fine-tuned comparison.
 
@@ -18,9 +19,9 @@ run's full configuration and metrics are in its `run.json`.
 | Task | T3-L: "Put the {color} cube in the bowl" with 2–3 cubes in the scene |
 | Backbone | [`HuggingFaceTB/SmolVLM2-500M-Video-Instruct`](https://huggingface.co/HuggingFaceTB/SmolVLM2-500M-Video-Instruct), frozen, fp16 on MPS, revision pinned in each checkpoint |
 | VLM features | Decoder layer 16 at 2 × 64 image tokens (an 8 × 8 grid per camera) and at the final prompt token |
-| Trained head | 0.38 M parameters: shared per-token projection 960 → 8, instruction projection 960 → 32, MLP with two 256-unit layers |
+| Trained head | 0.39 M parameters: shared per-token projection 960 → 8, instruction projection 960 → 32, MLP with two 256-unit layers |
 | Inputs | Front and wrist RGB at 256 × 256, 12-D robot state, instruction text |
-| Output | Change in TCP xyz and yaw plus a gripper logit, emitted as the absolute `[x, y, z, yaw, g]` action |
+| Output | A chunk of 10 future actions (0.5 s): TCP xyz and yaw changes plus gripper logits. The policy re-plans every 2 steps and blends overlapping chunks into one absolute `[x, y, z, yaw, g]` action per step |
 | Training data | Clean expert actions from `t3l-l1`; the limited profile uses 150 episodes and 7,200 frames |
 | Compute (M3 Max) | About 33 min to encode the limited profile once (3.8 examples/s, about 3 GB); minutes per head run from cached features |
 
@@ -31,10 +32,11 @@ SmolVLM2 in a single prompt, instruction first. The adapter reads decoder
 layer 16 at each camera's 64 image tokens and at the final prompt token. The
 head standardizes these features and the robot state, projects every image
 token with one shared linear layer, projects the final-token feature
-separately, and maps the result through an MLP to a TCP change and a gripper
-logit. In training, the change is compared with the clean expert action minus
-the current TCP pose; in rollout, it is added to the current TCP pose,
-clipped to the workspace limits, and sent to the controller.
+separately, and maps the result through an MLP to a chunk of TCP changes and
+gripper logits for the next 10 steps. In training, each change is compared
+with the corresponding clean expert action minus the current TCP pose; in
+rollout, the changes are added to the TCP pose at prediction time to form a
+plan of absolute targets.
 
 ```mermaid
 flowchart LR
@@ -59,19 +61,32 @@ flowchart LR
     project --> concat
     normalize --> concat
     concat --> head["MLP 2 × 256<br/>trained"]
-    head --> prediction["Normalized TCP change<br/>and gripper logit"]
+    head --> prediction["10-step chunk: normalized<br/>TCP changes, gripper logits"]
 
-    prediction --> rollout["Rollout: TCP + change,<br/>clip, send to control loop"]
-    prediction --> loss["Training: L1 on change,<br/>BCE on gripper"]
-    target["Clean expert action<br/>minus current TCP"] --> loss
+    prediction --> rollout["Rollout: plan = TCP + changes;<br/>blend overlapping plans,<br/>clip, send to control loop"]
+    prediction --> loss["Training: masked L1 on changes,<br/>BCE on gripper"]
+    target["Next 10 clean expert actions<br/>minus current TCP"] --> loss
 ```
 
-The policy is single-step: each observation produces one command at the
-project's 20 Hz policy rate, without action chunking. Predicting the change
-from the current TCP pose, as the RL expert does, turns a prediction error
-into a drift that the closed loop corrects rather than a fixed offset. The
-emitted action follows the shared base-frame TCP target convention, with yaw
-in radians and the gripper command in `[0, 1]`.
+### Action chunking
+
+The head predicts the next 10 actions (0.5 s) from each observation. The
+policy queries the VLM every `replan_interval` steps (default 2) and stores
+each query's plan of absolute targets. At every 20 Hz step it executes the
+weighted average of all stored plans that cover that step, where a plan made
+`a` steps ago has weight `exp(-ensemble_decay · a)` (default 0, an equal
+average); the gripper opens when the averaged open probability is at least
+0.5. Chunking makes the policy commit to a short plan instead of deciding
+every frame independently, which smooths motion and gripper decisions, and
+it runs the VLM half as often. Both settings are inference options
+(`--replan-interval`, `--ensemble-decay`) and do not require retraining; the
+default was chosen on validation scenes (see
+[decisions.md](decisions.md#frozen-backbone-vla-baseline)).
+
+Predicting changes from the TCP pose, as the RL expert does, turns a
+prediction error into a drift that the closed loop corrects rather than a
+fixed offset. The emitted action follows the shared base-frame TCP target
+convention, with yaw in radians and the gripper command in `[0, 1]`.
 
 ### VLM adapter
 
@@ -99,11 +114,11 @@ from the training frames selected by the profile, never from validation data.
 It applies one 960 → 8 linear projection to every image token, preserving the
 grid layout in the flattened vector, and a 960 → 32 projection to the
 final-token feature. These are concatenated with the normalized state and
-passed through two 256-unit GELU layers to four continuous outputs and a
-gripper logit. The continuous outputs are the change in TCP x, y, z, and yaw,
-scaled by the training mean and standard deviation of that change. A
-non-negative logit commands an open gripper (`g = 1`); a negative logit
-commands it closed (`g = 0`).
+passed through two 256-unit GELU layers to 50 outputs: for each of the 10
+chunk positions, the change in TCP x, y, z, and yaw from the current pose,
+and a gripper logit. Each position's changes are scaled by their own training
+mean and standard deviation, because later steps move farther. A positive
+logit corresponds to an open gripper.
 
 ## Data
 
@@ -160,24 +175,31 @@ episode IDs and frame indices.
 manifest (`task: T3-L`, training instruction templates), opens both LeRobot
 splits, and loads the VLM. [`train_vla`](../policies/vla.py#L732) then:
 
-1. Encodes each selected train and validation frame once with the frozen VLM,
+1. Labels each selected frame with the next 10 clean expert actions from the
+   same episode. Positions past the end of the episode repeat its last action
+   and are masked out of the loss.
+2. Encodes each selected train and validation frame once with the frozen VLM,
    or loads matching features from the feature cache. Token grids are held in
-   host memory as fp16, about 1.8 GB for the limited profile.
-2. Computes normalization statistics from the encoded training frames.
-3. Trains the head with AdamW on a weighted objective: 0.8 × L1 on the
-   normalized TCP change and 0.2 × class-balanced binary cross-entropy on the
-   gripper, with the closed-to-open label ratio as the positive weight.
+   host memory as fp16, about 1.8 GB for the limited profile. Cached features
+   are used only if they reproduce the dataset's current action labels.
+3. Computes normalization statistics from the encoded training frames,
+   separately for each chunk position.
+4. Trains the head with AdamW on a weighted objective over all valid chunk
+   positions: 0.8 × L1 on the normalized TCP changes and 0.2 ×
+   class-balanced binary cross-entropy on the gripper, with the
+   closed-to-open label ratio as the positive weight.
    Dropout (default 0.1) is applied to the projected VLM features, and
    gradients are clipped.
-4. Evaluates the head on the cached validation features after every epoch
+5. Evaluates the head on the cached validation features after every epoch
    and keeps the state with the lowest validation objective.
-5. Evaluates the selected head a second time with every VLM feature replaced
+6. Evaluates the selected head a second time with every VLM feature replaced
    by its training mean. This feature ablation quantifies how much the head
    relies on vision and language rather than robot state alone.
-6. Saves the head checkpoint and the run record.
+7. Saves the head checkpoint and the run record.
 
-Defaults are batch size 128, learning rate 1e-3, weight decay 1e-2, and up to
-60 epochs with early-stopping patience 10. The `full` profile uses every frame
+Defaults are a 10-step chunk (`--chunk-size`; 1 trains a single-step head),
+batch size 128, learning rate 1e-3, weight decay 1e-2, and up to 60 epochs
+with early-stopping patience 10. The `full` profile uses every frame
 in both splits. `--max-encoding-samples` and `--max-train-steps` cap a run for
 integration checks only: the encoding cap takes the first rows in dataset
 order, so capped runs are not representative, and the caps cannot be combined
@@ -196,13 +218,13 @@ this document use `RUN_DIR` for the run directory that `make train-vla`
 reports, for example:
 
 ```sh
-RUN_DIR=checkpoints/vla/t3l-l1/limited-red-blue-two-cube-run-05
+RUN_DIR=checkpoints/vla/t3l-l1/limited-red-blue-two-cube-run-06
 make tensorboard TENSORBOARD_LOGDIR=$RUN_DIR/tensorboard
 ```
 
 TensorBoard shows the combined objective, action L1, gripper BCE and
 accuracy, per-component MAE, gradient norm, learning rate, throughput, and
-the feature-ablation L1 of the selected head.
+the chunk and feature-ablation L1 of the selected head.
 
 `--resume-from` continues a run in place with a fresh optimizer, and
 `--initialize-from` starts a new versioned run from an existing head. Both
@@ -225,11 +247,13 @@ deleted at any time and is regenerated on demand.
 ### Offline metrics
 
 The head is evaluated before training and after every epoch. Validation
-action L1 is the mean absolute error of the absolute action, after the
-predicted change is added to the TCP pose, across the four continuous
-components and the binary gripper decision. The run record also stores
-per-component MAE, gripper accuracy, per-episode error, and the same metrics
-with the VLM features ablated (`ablated_validation_l1`,
+action L1 is the mean absolute error of the first action in the chunk, the
+one that would execute immediately, after the predicted change is added to
+the TCP pose, across the four continuous components and the binary gripper
+decision; it is directly comparable with single-step heads.
+`validation_chunk_l1` averages the same error over every valid chunk
+position. The run record also stores per-component MAE, gripper accuracy,
+per-episode error, and the first-step metrics with the VLM features ablated (`ablated_validation_l1`,
 `ablated_validation_action_mae`). A small gap between the two indicates that
 the head is not using vision or language.
 
@@ -253,22 +277,28 @@ or grounding.
   1,000,000 and reports success rate, Wilson 95% interval, and failure
   breakdown. Full-profile results are written to
   `eval/results/vla-prototype/`, and limited-profile checkpoints to
-  `eval/results/vla-prototype-limited/`. The wrong-object rate is not yet
-  computed by this evaluator.
+  `eval/results/vla-prototype-limited/`; chunked heads append their chunk,
+  re-planning, and decay settings to the method name. The wrong-object rate
+  is not yet computed by this evaluator.
+
+All three scripts, and the viewer, accept `--replan-interval` and
+`--ensemble-decay` for chunked heads.
 
 `--scope limited` evaluates only red/blue targets with two active cubes, using
 the training instruction templates. It scans evaluation seeds until it has
 the requested number of matching episodes and saves each episode's robot
 state, action, next state, object positions, and outcome at every step (no
-camera frames). Inference takes about 80 s per episode on the reference
-laptop.
+camera frames). Each trajectory also records the chunk size, re-planning
+interval, and ensemble decay, which are part of the result's configuration
+hash. A single-step head takes about 80 s per 15 s episode on the reference
+laptop; re-planning every 2 steps halves the VLM time.
 
 ```sh
-make evaluate-vla VLA_EVAL_ARGS="--checkpoint $RUN_DIR/checkpoint.pt --scope limited --episodes 20 --seed-start 1000000 --max-candidates 1000 --device mps --results-dir eval/results/vla-limited-grid"
+make evaluate-vla VLA_EVAL_ARGS="--checkpoint $RUN_DIR/checkpoint.pt --scope limited --episodes 20 --seed-start 1000000 --max-candidates 1000 --device mps --results-dir eval/results/vla-limited-chunk"
 ```
 
 Results are written to
-`eval/results/vla-limited-grid/vla-prototype-limited-matched/T3-L-L1.json`,
+`eval/results/vla-limited-chunk/vla-prototype-limited-matched/T3-L-L1.json`,
 with per-episode trajectories in `T3-L-L1-trajectories/` beside it. A
 separate `--results-dir` keeps these runs out of the generated benchmark
 report. Limited-scope runs are diagnostics; reportable success rates follow
@@ -281,7 +311,7 @@ A saved trajectory can be rendered to a real-time 20 Hz GIF without running
 the VLA:
 
 ```sh
-make render-vla-trajectory VLA_RENDER_ARGS="--trajectory eval/results/vla-limited-grid/vla-prototype-limited-matched/T3-L-L1-trajectories/seed-1000005.json --gif docs/media/t3l-l1-vla-limited.gif"
+make render-vla-trajectory VLA_RENDER_ARGS="--trajectory eval/results/vla-limited-chunk/vla-prototype-limited-matched/T3-L-L1-trajectories/seed-1000011.json --gif docs/media/t3l-l1-vla-chunk.gif"
 ```
 
 The replay resets the scene from the saved seed and instruction template,
@@ -292,32 +322,101 @@ and `--show-tcp` control the output.
 ## Inference and checkpoints
 
 [`VLAActionPolicy`](../policies/vla.py#L560) implements the shared `Policy`
-interface. It receives the instruction at `reset`, lazily loads the frozen VLM
-at the checkpoint's revision and feature layer, and returns clipped 5-D
-actions from the images, instruction, and robot state. View a seeded
-rollout in the MuJoCo viewer with:
+interface. It receives the instruction at `reset`, which also discards stored
+plans, lazily loads the frozen VLM at the checkpoint's revision and feature
+layer, and returns one clipped 5-D action per call, querying the VLM every
+`replan_interval` calls. View a seeded rollout in the MuJoCo viewer with:
 
 ```sh
 make view-vla VLA_VIEW_ARGS="--checkpoint $RUN_DIR/checkpoint.pt --seed 1000000 --device mps"
 ```
 
-The checkpoint (format 3) stores the head weights, all normalization
+The checkpoint (format 4) stores the head weights, all normalization
 statistics, the VLM identifier and immutable revision, the training profile,
-the feature layer, and the image-token count; it does not duplicate the VLM
-weights. Checkpoints in earlier formats are rejected. Each run's `run.json`
-records the configuration, dataset version, selected seeds and frames,
-hardware, precision, VLM revision, encoding throughput and memory,
-cached-example count, validation and feature-ablation metrics, and run
-status.
+the feature layer, the image-token count, and the chunk size; it does not
+duplicate the VLM weights. Format-3 single-step checkpoints load with a chunk
+size of 1, and earlier formats are rejected. Each run's `run.json` records the
+configuration, dataset version, selected seeds and frames, hardware,
+precision, VLM revision, encoding throughput and memory, cached-example
+count, validation, chunk, and feature-ablation metrics, and run status.
 
 ## Limitations
 
-- **Gripper timing.** The gripper command is classified independently at
-  every frame, with no temporal consistency. In closed loop it can close for
-  a single step beside the cube and reopen while the arm continues past it.
-  The PPO expert grasps while moving and releases above the bowl, which
-  leaves little margin for timing errors.
+- **Grasp completion.** Action chunking largely removed the single-step
+  head's gripper flicker, and the arm now commits to a cube in almost every
+  episode, but many grasps still fail: the gripper closes slightly off the
+  cube, or the arm pushes the other cube while approaching. The PPO expert
+  grasps while moving and releases above the bowl, which leaves little
+  margin for position errors.
 - **No failure recovery in the data.** The datasets keep only successful
   expert episodes, so states after a missed grasp are out of distribution.
 - **Limited scene diversity.** The limited profile contains 150 training
   scenes; training error is substantially lower than validation error.
+
+## Future work
+
+The extensions below are not planned. They record the directions that the
+current results suggest would most improve this baseline.
+
+### Evaluation
+
+- **Larger evaluation.** Evaluate at least 50 episodes per cell, the minimum
+  for a reportable image-policy result in this project, and generate the
+  tables with `eval/report.py`. The 20-episode limited-scope runs are
+  diagnostics.
+- **Wrong-object rate.** Compute it in the evaluator: a cube other than the
+  named one moved more than 2 cm or ended in the bowl. The smoke test reports
+  it per episode, and limited-scope trajectories contain the data needed to
+  compute it, but the evaluator does not aggregate it yet.
+- **Language generalization.** Evaluate the held-out instruction template
+  ("Move the {color} cube into the bowl.") beyond the two-episode smoke test.
+- **Full task distribution.** Evaluate green targets and three-cube scenes,
+  which requires a head trained on the full profile.
+- **Latency.** Record p50 and p95 action latency at the default re-planning
+  interval, alongside the VLM query latency.
+
+### Data
+
+- **Recovery data with DAgger.** Run the trained policy in simulation, label
+  the states it visits with the PPO expert, which observes the true object
+  poses, and retrain on the aggregated data. This directly targets states
+  after a missed grasp, which the success-only demonstrations never contain.
+  The expert integrates its actions into an internal target, so labelling
+  arbitrary states needs that target initialized consistently. A cheaper
+  alternative is collecting demonstrations with larger or more frequent
+  action perturbations.
+- **More scenes.** Train on the full profile: all 380 training episodes,
+  including green targets and three-cube scenes, about 50,000 frames. It
+  takes about 3.7 hours to encode once and a 12 GB feature cache. Collect
+  more validation episodes as well, since seven is too few for reliable
+  model selection.
+
+### Model and training
+
+- **Closed-loop model selection.** Keep several candidate checkpoints and
+  select by success on validation seeds instead of offline validation loss,
+  which is dominated by frames where the robot state alone predicts the
+  action.
+- **Regularization sweep.** Sweep dropout, weight decay, Gaussian noise on
+  the VLM features, and random masking of the robot-state input. The feature
+  cache makes each run take minutes. Image augmentation would require
+  caching several augmented encodings of each frame.
+- **Instruction-conditioned spatial pooling.** Replace the flattened
+  per-token projection with attention pooling, using the instruction feature
+  as the query over the 8 × 8 token grids, so cube appearance is learned
+  independently of its position and the instruction selects the target
+  directly. A spatial-softmax variant underperformed the current head in
+  probes on cached features, so new heads should be screened the same way
+  before full training.
+- **Feature layer.** Compare other decoder layers, or a concatenation of two,
+  for the image-token grid; only layers 0, 16, and 32 were compared for it.
+- **Chunk settings.** Tune the chunk length and the ensemble decay, which
+  were fixed at 10 steps and 0 (equal weighting). Only the re-planning
+  interval was tuned.
+
+### Inference
+
+- **Truncated decoder.** Only layer 16 is read, so the remaining 16 decoder
+  layers can be skipped without changing the features. The vision encoder,
+  which processes 2 × 1,024 patches per query, probably dominates the cost,
+  so profile before optimizing further.

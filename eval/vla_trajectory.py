@@ -47,6 +47,9 @@ class VLAEpisodeTrajectory(BaseModel):
     model_id: str
     model_revision: str
     training_profile: Literal["limited"]
+    chunk_size: int = Field(default=1, ge=1)
+    replan_interval: int = Field(default=1, ge=1)
+    ensemble_decay: float = Field(default=0.0, ge=0.0)
     git_commit: str
     result: EpisodeResult
     steps: list[VLATrajectoryStep]

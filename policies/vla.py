@@ -30,7 +30,9 @@ from motion.control import WORKSPACE_LOWER, WORKSPACE_UPPER
 
 MODEL_ID = "HuggingFaceTB/SmolVLM2-500M-Video-Instruct"
 TRANSFORMERS_VERSION = "5.20.2"
-CHECKPOINT_FORMAT_VERSION = 3
+CHECKPOINT_FORMAT_VERSION = 4
+DEFAULT_REPLAN_INTERVAL = 2
+_SINGLE_STEP_CHECKPOINT_FORMAT = 3
 DEFAULT_FEATURE_LAYER = 16
 VLAProfile = Literal["full", "limited"]
 _ACTION_LOW = np.array([*WORKSPACE_LOWER, -np.pi / 2, 0.0], dtype=np.float32)
@@ -59,6 +61,8 @@ class VLAConfig(BaseModel):
     model_revision: str = "main"
     profile: VLAProfile = "full"
     feature_layer: int = Field(default=DEFAULT_FEATURE_LAYER, ge=0)
+    # Actions predicted per policy query; 1 is the single-step head.
+    chunk_size: int = Field(default=1, ge=1)
     epochs: int = Field(default=60, ge=1)
     batch_size: int = Field(default=128, ge=1)
     encoding_batch_size: int = Field(default=4, ge=1)
@@ -125,6 +129,7 @@ class VLATrainingResult(BaseModel):
     best_validation_loss: float
     ablated_validation_l1: float
     ablated_validation_action_mae: dict[str, float]
+    validation_chunk_l1: float | None = None
 
 
 class VLAFeatureCache(BaseModel):
@@ -208,6 +213,61 @@ class VLAFrameDataset(Dataset[dict[str, Any]]):
             "action": torch.from_numpy(action),
             "episode_index": torch.tensor(episode_index, dtype=torch.int64),
         }
+
+    def action_chunks(self, chunk_size: int) -> tuple[Tensor, Tensor]:
+        """Return each selected frame's next clean actions and their validity mask."""
+        columns = self._numeric[:]
+        return action_chunk_labels(
+            columns["action"],
+            columns["episode_index"],
+            self._frame_indices,
+            chunk_size,
+        )
+
+
+def action_chunk_labels(
+    actions: Any,
+    episode_indices: Any,
+    frame_indices: Any,
+    chunk_size: int,
+) -> tuple[Tensor, Tensor]:
+    """Gather each frame's next ``chunk_size`` clean actions within its episode.
+
+    Positions past the end of an episode repeat the episode's final action and
+    are marked invalid in the returned mask, so they can be excluded from the
+    loss.
+    """
+    if isinstance(chunk_size, bool) or not isinstance(chunk_size, int):
+        raise TypeError("VLA chunk size must be an integer")
+    if chunk_size < 1:
+        raise ValueError("VLA chunk size must be positive")
+    all_actions = np.asarray(actions, dtype=np.float32)
+    episodes = np.asarray(episode_indices, dtype=np.int64)
+    frames = np.asarray(frame_indices, dtype=np.int64)
+    if (
+        all_actions.ndim != 2
+        or all_actions.shape[1] != 5
+        or episodes.shape != (all_actions.shape[0],)
+        or frames.ndim != 1
+        or frames.size == 0
+        or np.any(frames < 0)
+        or np.any(frames >= all_actions.shape[0])
+    ):
+        raise ValueError("VLA action-chunk inputs have invalid shapes or indices")
+    if not np.isfinite(all_actions).all():
+        raise ValueError("VLA action labels must be finite")
+    candidates = frames[:, None] + np.arange(chunk_size, dtype=np.int64)[None, :]
+    clipped = np.minimum(candidates, all_actions.shape[0] - 1)
+    same_episode = (candidates < all_actions.shape[0]) & (
+        episodes[clipped] == episodes[frames][:, None]
+    )
+    valid = np.cumprod(same_episode, axis=1).astype(bool)
+    last_valid = frames + valid.sum(axis=1) - 1
+    sources = np.where(valid, clipped, last_valid[:, None])
+    return (
+        torch.from_numpy(np.ascontiguousarray(all_actions[sources])),
+        torch.from_numpy(valid),
+    )
 
 
 class VLAEncoder(Protocol):
@@ -405,29 +465,33 @@ class FrozenSmolVLMEncoder:
 
 
 class VLAActionHead(nn.Module):
-    """Map frozen token grids, context, and state to a TCP delta and gripper logit."""
+    """Map frozen token grids, context, and state to TCP deltas and gripper logits."""
 
     def __init__(
         self,
         hidden_size: int,
         image_tokens: int,
         *,
+        chunk_size: int = 1,
         dropout: float = 0.0,
     ) -> None:
         """Create the per-token projection, MLP, and normalization buffers."""
         super().__init__()
-        if hidden_size < 1 or image_tokens < 1:
-            raise ValueError("hidden_size and image_tokens must be positive")
+        if hidden_size < 1 or image_tokens < 1 or chunk_size < 1:
+            raise ValueError(
+                "hidden_size, image_tokens, and chunk_size must be positive"
+            )
         self.hidden_size = hidden_size
         self.image_tokens = image_tokens
+        self.chunk_size = chunk_size
         self.register_buffer("state_mean", torch.zeros(12))
         self.register_buffer("state_std", torch.ones(12))
         self.register_buffer("grid_mean", torch.zeros(_CAMERA_COUNT, hidden_size))
         self.register_buffer("grid_std", torch.ones(_CAMERA_COUNT, hidden_size))
         self.register_buffer("context_mean", torch.zeros(hidden_size))
         self.register_buffer("context_std", torch.ones(hidden_size))
-        self.register_buffer("delta_mean", torch.zeros(4))
-        self.register_buffer("delta_std", torch.ones(4))
+        self.register_buffer("delta_mean", torch.zeros(chunk_size, 4))
+        self.register_buffer("delta_std", torch.ones(chunk_size, 4))
         self.token_projection = nn.Linear(hidden_size, _TOKEN_PROJECTION_SIZE)
         self.context_projection = nn.Linear(hidden_size, _CONTEXT_PROJECTION_SIZE)
         self.dropout = nn.Dropout(dropout)
@@ -435,12 +499,13 @@ class VLAActionHead(nn.Module):
             _CAMERA_COUNT * image_tokens * _TOKEN_PROJECTION_SIZE
             + _CONTEXT_PROJECTION_SIZE
         )
+        # Outputs are chunk_size xyz/yaw deltas followed by chunk_size logits.
         self.layers = nn.Sequential(
             nn.Linear(visual_size + 12, _MLP_WIDTH),
             nn.GELU(),
             nn.Linear(_MLP_WIDTH, _MLP_WIDTH),
             nn.GELU(),
-            nn.Linear(_MLP_WIDTH, 5),
+            nn.Linear(_MLP_WIDTH, 5 * chunk_size),
         )
 
     def set_normalization(self, statistics: VLANormalization) -> None:
@@ -452,8 +517,8 @@ class VLAActionHead(nn.Module):
             "grid_std": (_CAMERA_COUNT, self.hidden_size),
             "context_mean": (self.hidden_size,),
             "context_std": (self.hidden_size,),
-            "delta_mean": (4,),
-            "delta_std": (4,),
+            "delta_mean": (self.chunk_size, 4),
+            "delta_std": (self.chunk_size, 4),
         }
         for name, shape in expected_shapes.items():
             value = getattr(statistics, name)
@@ -473,7 +538,7 @@ class VLAActionHead(nn.Module):
         )
 
     def forward(self, grid: Tensor, context: Tensor, state: Tensor) -> Tensor:
-        """Predict a normalized TCP xyz/yaw delta and an open-gripper logit."""
+        """Predict normalized TCP xyz/yaw deltas and open-gripper logits."""
         batch_size = state.shape[0]
         if grid.shape != (
             batch_size,
@@ -498,14 +563,30 @@ class VLAActionHead(nn.Module):
         )
         return self.layers(torch.cat((self.dropout(visual), normalized_state), dim=1))
 
-    def absolute_action(self, output: Tensor, state: Tensor) -> Tensor:
-        """Convert head outputs into absolute xyz/yaw targets plus the gripper logit."""
-        delta = output[:, :4] * self.delta_std + self.delta_mean
-        return torch.cat((state[:, _TCP_POSE] + delta, output[:, 4:]), dim=1)
+    def split_output(self, output: Tensor) -> tuple[Tensor, Tensor]:
+        """Split raw outputs into normalized deltas (B, k, 4) and logits (B, k)."""
+        batch_size = output.shape[0]
+        if output.shape != (batch_size, 5 * self.chunk_size):
+            raise ValueError("VLA head output has an invalid shape")
+        deltas = output[:, : 4 * self.chunk_size].reshape(
+            batch_size, self.chunk_size, 4
+        )
+        return deltas, output[:, 4 * self.chunk_size :]
 
-    def delta_targets(self, state: Tensor, action: Tensor) -> Tensor:
-        """Express clean absolute action labels as normalized TCP deltas."""
-        return (action[:, :4] - state[:, _TCP_POSE] - self.delta_mean) / self.delta_std
+    def absolute_actions(self, output: Tensor, state: Tensor) -> Tensor:
+        """Convert head outputs into absolute xyz/yaw targets and gripper logits.
+
+        Every chunk position is relative to the TCP pose at prediction time.
+        """
+        deltas, logits = self.split_output(output)
+        targets = state[:, None, _TCP_POSE] + deltas * self.delta_std + self.delta_mean
+        return torch.cat((targets, logits.unsqueeze(-1)), dim=-1)
+
+    def delta_targets(self, state: Tensor, action_chunks: Tensor) -> Tensor:
+        """Express clean absolute action chunks as normalized TCP deltas."""
+        return (
+            action_chunks[..., :4] - state[:, None, _TCP_POSE] - self.delta_mean
+        ) / self.delta_std
 
 
 class EncodedVLADataset(Dataset[dict[str, Tensor]]):
@@ -518,6 +599,9 @@ class EncodedVLADataset(Dataset[dict[str, Tensor]]):
         states: Tensor,
         actions: Tensor,
         episode_indices: Tensor,
+        *,
+        action_chunks: Tensor | None = None,
+        chunk_mask: Tensor | None = None,
     ) -> None:
         """Validate and retain encoded CPU tensors for repeated head epochs."""
         count = grid.shape[0]
@@ -531,16 +615,55 @@ class EncodedVLADataset(Dataset[dict[str, Tensor]]):
             or episode_indices.shape != (count,)
         ):
             raise ValueError("Encoded VLA tensors have incompatible shapes")
+        if (action_chunks is None) != (chunk_mask is None):
+            raise ValueError("VLA action chunks and their mask must be given together")
+        if action_chunks is None or chunk_mask is None:
+            action_chunks = actions[:, None, :]
+            chunk_mask = torch.ones((count, 1), dtype=torch.bool)
+        if (
+            action_chunks.ndim != 3
+            or action_chunks.shape[0] != count
+            or action_chunks.shape[2] != 5
+            or chunk_mask.shape != action_chunks.shape[:2]
+            or chunk_mask.dtype != torch.bool
+            or not torch.all(chunk_mask[:, 0])
+        ):
+            raise ValueError("VLA action chunks have an invalid shape or mask")
+        if not torch.equal(action_chunks[:, 0], actions):
+            raise ValueError("VLA action chunks do not start at the encoded actions")
         self.grid = grid.contiguous()
         self.context = context.contiguous()
         self.states = states.contiguous()
         self.actions = actions.contiguous()
         self.episode_indices = episode_indices.contiguous()
+        self.action_chunks = action_chunks.contiguous()
+        self.chunk_mask = chunk_mask.contiguous()
 
     @property
     def image_tokens(self) -> int:
         """Return the number of image tokens per camera."""
         return int(self.grid.shape[2])
+
+    @property
+    def chunk_size(self) -> int:
+        """Return the number of future actions labelled for every frame."""
+        return int(self.action_chunks.shape[1])
+
+    def with_action_chunks(
+        self,
+        action_chunks: Tensor,
+        chunk_mask: Tensor,
+    ) -> EncodedVLADataset:
+        """Return the same encoded frames labelled with multi-step action chunks."""
+        return EncodedVLADataset(
+            self.grid,
+            self.context,
+            self.states,
+            self.actions,
+            self.episode_indices,
+            action_chunks=action_chunks,
+            chunk_mask=chunk_mask,
+        )
 
     def __len__(self) -> int:
         """Return the number of encoded demonstration steps."""
@@ -552,13 +675,20 @@ class EncodedVLADataset(Dataset[dict[str, Tensor]]):
             "grid": self.grid[index],
             "context": self.context[index],
             "state": self.states[index],
-            "action": self.actions[index],
+            "action_chunk": self.action_chunks[index],
+            "chunk_mask": self.chunk_mask[index],
             "episode_index": self.episode_indices[index],
         }
 
 
 class VLAActionPolicy:
-    """Lazy-loading adapter for the shared evaluation Policy protocol."""
+    """Lazy-loading adapter for the shared evaluation Policy protocol.
+
+    A chunked head predicts the next ``chunk_size`` actions per VLM query. The
+    policy queries every ``replan_interval`` steps and executes the weighted
+    average of every stored plan that covers the current step; a plan made
+    ``a`` steps ago has weight ``exp(-ensemble_decay * a)``.
+    """
 
     def __init__(
         self,
@@ -571,6 +701,9 @@ class VLAActionPolicy:
         image_tokens: int,
         training_profile: VLAProfile = "full",
         feature_layer: int = DEFAULT_FEATURE_LAYER,
+        chunk_size: int = 1,
+        replan_interval: int | None = None,
+        ensemble_decay: float = 0.0,
         device: str | torch.device = "auto",
     ) -> None:
         """Bind a trained head to a loaded or lazily loaded frozen VLM."""
@@ -581,14 +714,26 @@ class VLAActionPolicy:
             "limited",
         }:
             raise ValueError("VLA training_profile must be 'full' or 'limited'")
-        if image_tokens < 1 or feature_layer < 0:
-            raise ValueError("VLA image tokens and feature layer must be valid")
+        if image_tokens < 1 or feature_layer < 0 or chunk_size < 1:
+            raise ValueError("VLA image tokens, feature layer, and chunk size invalid")
+        resolved_interval = (
+            min(DEFAULT_REPLAN_INTERVAL, chunk_size)
+            if replan_interval is None
+            else replan_interval
+        )
+        if not 1 <= resolved_interval <= chunk_size:
+            raise ValueError("VLA replan_interval must be between 1 and chunk_size")
+        if not np.isfinite(ensemble_decay) or ensemble_decay < 0.0:
+            raise ValueError("VLA ensemble_decay must be finite and non-negative")
         self.device = resolve_device(device)
         self.model_id = model_id
         self.model_revision = model_revision
         self.training_profile = training_profile
         self.feature_layer = feature_layer
         self.image_tokens = image_tokens
+        self.chunk_size = chunk_size
+        self.replan_interval = resolved_interval
+        self.ensemble_decay = float(ensemble_decay)
         self._head_state = {
             name: tensor.detach().cpu() for name, tensor in head_state.items()
         }
@@ -601,8 +746,8 @@ class VLAActionPolicy:
         if head is not None:
             if encoder is None or head.hidden_size != encoder.hidden_size:
                 raise ValueError("VLA head and encoder hidden sizes must match")
-            if head.image_tokens != image_tokens:
-                raise ValueError("VLA head image-token count does not match")
+            if head.image_tokens != image_tokens or head.chunk_size != chunk_size:
+                raise ValueError("VLA head image tokens or chunk size do not match")
             self.head = head.to(self.device).eval()
             if not self._head_state:
                 self._head_state = {
@@ -610,37 +755,72 @@ class VLAActionPolicy:
                     for name, tensor in self.head.state_dict().items()
                 }
         self._instruction: str | None = None
+        self._step = 0
+        self._plans: list[_ActionPlan] = []
 
     def reset(self, instruction: str | None = None) -> None:
-        """Set the episode's language command and clear no temporal state."""
+        """Set the episode's language command and discard earlier plans."""
         self._instruction = (
             instruction.strip()
             if isinstance(instruction, str) and instruction.strip()
             else None
         )
+        self._step = 0
+        self._plans = []
 
     def act(self, obs: Mapping[str, Any]) -> np.ndarray:
         """Return a clipped 5-D action from images, state, and reset instruction."""
-        if self._instruction is None:
+        instruction = self._instruction
+        if instruction is None:
             raise RuntimeError("VLAActionPolicy requires an instruction at reset")
+        self._plans = [
+            plan for plan in self._plans if plan.start + self.chunk_size > self._step
+        ]
+        if self._step % self.replan_interval == 0 or not self._plans:
+            self._plans.append(self._plan(obs, instruction))
+        ages = np.array([self._step - plan.start for plan in self._plans])
+        weights = np.exp(-self.ensemble_decay * ages)
+        targets = np.stack(
+            [plan.targets[age] for plan, age in zip(self._plans, ages, strict=True)]
+        )
+        open_probabilities = np.array(
+            [
+                plan.open_probabilities[age]
+                for plan, age in zip(self._plans, ages, strict=True)
+            ]
+        )
+        target = weights @ targets / weights.sum()
+        open_probability = float(weights @ open_probabilities / weights.sum())
+        self._step += 1
+        action = np.array(
+            [*target, float(open_probability >= 0.5)],
+            dtype=np.float32,
+        )
+        return np.clip(action, _ACTION_LOW, _ACTION_HIGH)
+
+    def _plan(self, obs: Mapping[str, Any], instruction: str) -> _ActionPlan:
+        """Query the VLM once and return absolute targets for the next chunk."""
         encoder, head = self._ensure_loaded()
         state = _finite_vector(obs.get("observation.state"), (12,), "state")
         front = _rgb_image(obs.get(_IMAGE_KEYS[0]), _IMAGE_KEYS[0])
         wrist = _rgb_image(obs.get(_IMAGE_KEYS[1]), _IMAGE_KEYS[1])
         with torch.inference_mode():
-            features = encoder.encode([front], [wrist], [self._instruction])
+            features = encoder.encode([front], [wrist], [instruction])
             state_tensor = torch.from_numpy(state).unsqueeze(0).to(self.device)
             output = head(
                 features.grid.to(self.device),
                 features.context.to(self.device),
                 state_tensor,
             )
-            prediction = head.absolute_action(output, state_tensor)[0]
-        action = prediction.detach().cpu().numpy().astype(np.float32, copy=False)
-        if action.shape != (5,) or not np.isfinite(action).all():
-            raise FloatingPointError("VLA action head must emit a finite 5-D action")
-        action[4] = float(action[4] >= 0.0)
-        return np.clip(action, _ACTION_LOW, _ACTION_HIGH)
+            actions = head.absolute_actions(output, state_tensor)[0]
+        plan = actions.detach().cpu().numpy().astype(np.float64)
+        if plan.shape != (self.chunk_size, 5) or not np.isfinite(plan).all():
+            raise FloatingPointError("VLA action head must emit finite action chunks")
+        return _ActionPlan(
+            start=self._step,
+            targets=plan[:, :4],
+            open_probabilities=0.5 * (1.0 + np.tanh(0.5 * plan[:, 4])),
+        )
 
     def __getstate__(self) -> dict[str, Any]:
         """Exclude the large VLM from process-pool pickles used by evaluation."""
@@ -648,6 +828,8 @@ class VLAActionPolicy:
         state["head"] = None
         state["encoder"] = None
         state["_instruction"] = None
+        state["_step"] = 0
+        state["_plans"] = []
         return state
 
     def _ensure_loaded(self) -> tuple[VLAEncoder, VLAActionHead]:
@@ -665,10 +847,22 @@ class VLAActionPolicy:
                 raise RuntimeError("Loaded VLM feature layer does not match")
             self.encoder = encoder
         if self.head is None:
-            head = VLAActionHead(self.encoder.hidden_size, self.image_tokens)
+            head = VLAActionHead(
+                self.encoder.hidden_size,
+                self.image_tokens,
+                chunk_size=self.chunk_size,
+            )
             head.load_state_dict(self._head_state, strict=True)
             self.head = head.to(self.device).eval()
         return self.encoder, self.head
+
+
+class _ActionPlan(NamedTuple):
+    """Hold one VLM query's absolute targets and open probabilities per step."""
+
+    start: int
+    targets: np.ndarray
+    open_probabilities: np.ndarray
 
 
 def load_frozen_smolvlm(
@@ -772,12 +966,15 @@ def train_vla(
     if config.device != "auto" and resolve_device(config.device) != device:
         raise ValueError("VLA encoder device does not match the training config")
     _reset_peak_memory(encoder.device)
+    train_chunks, train_chunk_mask = _chunk_labels(train_dataset, config)
+    validation_chunks, validation_chunk_mask = _chunk_labels(validation_dataset, config)
     train_encoded, train_seconds, train_cached = _load_or_encode(
         train_dataset,
         encoder,
         config,
         "train",
         feature_cache,
+        expected_actions=train_chunks[:, 0],
     )
     validation_encoded, validation_seconds, validation_cached = _load_or_encode(
         validation_dataset,
@@ -785,6 +982,11 @@ def train_vla(
         config,
         "validation",
         feature_cache,
+        expected_actions=validation_chunks[:, 0],
+    )
+    train_encoded = train_encoded.with_action_chunks(train_chunks, train_chunk_mask)
+    validation_encoded = validation_encoded.with_action_chunks(
+        validation_chunks, validation_chunk_mask
     )
     if validation_encoded.image_tokens != train_encoded.image_tokens:
         raise ValueError("VLA train and validation image-token counts differ")
@@ -817,6 +1019,7 @@ def train_vla(
         head = VLAActionHead(
             encoder.hidden_size,
             train_encoded.image_tokens,
+            chunk_size=config.chunk_size,
             dropout=config.dropout,
         )
         head.set_normalization(statistics)
@@ -827,6 +1030,8 @@ def train_vla(
             or initial_head.image_tokens != train_encoded.image_tokens
         ):
             raise ValueError("Warm-start VLA head does not match the encoder features")
+        if initial_head.chunk_size != config.chunk_size:
+            raise ValueError("Warm-start VLA head predicts a different chunk size")
         # Feature statistics stay with the head: re-encoded fp16 features can
         # differ slightly, while state and action statistics must match exactly.
         existing = initial_head.normalization()
@@ -842,7 +1047,9 @@ def train_vla(
                 )
         initial_head.dropout.p = config.dropout
         head = initial_head.to(device)
-    train_gripper_targets = _binary_gripper_targets(train_encoded.actions[:, 4])
+    train_gripper_targets = _binary_gripper_targets(
+        train_encoded.action_chunks[..., 4][train_encoded.chunk_mask]
+    )
     open_count = int(train_gripper_targets.sum().item())
     closed_count = len(train_gripper_targets) - open_count
     gripper_positive_weight = (
@@ -902,21 +1109,26 @@ def train_vla(
         train_gripper_bce_sum = 0.0
         train_samples = 0
         for batch in tqdm(training_loader, desc=f"VLA head {epoch}", unit="batch"):
-            grid, context, state, action = _batch_to_device(batch, device)
+            grid, context, state, action_chunk, chunk_mask = _batch_to_device(
+                batch, device
+            )
             output = head(grid, context, state)
-            gripper_target = _binary_gripper_targets(action[:, 4])
-            action_loss = F.l1_loss(output[:, :4], head.delta_targets(state, action))
-            gripper_bce = F.binary_cross_entropy_with_logits(
-                output[:, 4],
-                gripper_target,
-                pos_weight=gripper_positive_weight_tensor,
+            action_loss, gripper_bce = _chunk_losses(
+                head,
+                output,
+                state,
+                action_chunk,
+                chunk_mask,
+                gripper_positive_weight_tensor,
             )
             loss = (
                 1.0 - config.gripper_loss_weight
             ) * action_loss + config.gripper_loss_weight * gripper_bce
-            gripper_prediction = output[:, 4] >= 0.0
+            action = action_chunk[:, 0]
+            gripper_target = _binary_gripper_targets(action[:, 4])
+            gripper_prediction = head.split_output(output)[1][:, 0] >= 0.0
             action_l1 = _action_errors(
-                head.absolute_action(output.detach(), state),
+                head.absolute_actions(output.detach(), state)[:, 0],
                 action,
             ).mean()
             optimizer_steps += 1
@@ -1026,6 +1238,7 @@ def train_vla(
             optimizer_steps,
             {
                 "validation/best_action_l1": final_validation.l1,
+                "validation/chunk_l1": final_validation.chunk_l1,
                 "validation/ablated_action_l1": ablated_validation.l1,
             },
         )
@@ -1046,6 +1259,7 @@ def train_vla(
         best_validation_loss=best_validation_loss,
         ablated_validation_l1=ablated_validation.l1,
         ablated_validation_action_mae=ablated_validation.action_mae,
+        validation_chunk_l1=final_validation.chunk_l1,
     )
     return head, result, encoder
 
@@ -1074,6 +1288,7 @@ def save_vla_checkpoint(
             "model_revision": model_revision,
             "training_profile": training_profile,
             "feature_layer": feature_layer,
+            "chunk_size": head.chunk_size,
             "hidden_size": head.hidden_size,
             "image_tokens": head.image_tokens,
             "state_dict": _copy_state_dict(head),
@@ -1092,6 +1307,7 @@ def load_vla_training_head(
     training_profile: VLAProfile,
     hidden_size: int,
     feature_layer: int,
+    chunk_size: int,
 ) -> VLAActionHead:
     """Load a head checkpoint only when its frozen-VLM metadata matches."""
     checkpoint = _read_checkpoint(path)
@@ -1105,7 +1321,13 @@ def load_vla_training_head(
         raise ValueError("Warm-start VLA checkpoint has a different feature size")
     if checkpoint.feature_layer != feature_layer:
         raise ValueError("Warm-start VLA checkpoint uses a different feature layer")
-    head = VLAActionHead(checkpoint.hidden_size, checkpoint.image_tokens)
+    if checkpoint.chunk_size != chunk_size:
+        raise ValueError("Warm-start VLA checkpoint predicts a different chunk size")
+    head = VLAActionHead(
+        checkpoint.hidden_size,
+        checkpoint.image_tokens,
+        chunk_size=checkpoint.chunk_size,
+    )
     head.load_state_dict(checkpoint.state_dict, strict=True)
     return head
 
@@ -1113,10 +1335,20 @@ def load_vla_training_head(
 def load_vla_policy(
     path: str | Path,
     device: str | torch.device = "auto",
+    *,
+    replan_interval: int | None = None,
+    ensemble_decay: float = 0.0,
 ) -> VLAActionPolicy:
-    """Restore a head checkpoint as a lazy-loading shared evaluation policy."""
+    """Restore a head checkpoint as a lazy-loading shared evaluation policy.
+
+    ``replan_interval`` defaults to 2 steps, or 1 for single-step heads.
+    """
     checkpoint = _read_checkpoint(path)
-    head = VLAActionHead(checkpoint.hidden_size, checkpoint.image_tokens)
+    head = VLAActionHead(
+        checkpoint.hidden_size,
+        checkpoint.image_tokens,
+        chunk_size=checkpoint.chunk_size,
+    )
     head.load_state_dict(checkpoint.state_dict, strict=True)
     return VLAActionPolicy(
         None,
@@ -1127,6 +1359,9 @@ def load_vla_policy(
         image_tokens=checkpoint.image_tokens,
         training_profile=checkpoint.training_profile,
         feature_layer=checkpoint.feature_layer,
+        chunk_size=checkpoint.chunk_size,
+        replan_interval=replan_interval,
+        ensemble_decay=ensemble_decay,
         device=device,
     )
 
@@ -1138,18 +1373,25 @@ class _CheckpointContents(NamedTuple):
     model_revision: str
     training_profile: VLAProfile
     feature_layer: int
+    chunk_size: int
     hidden_size: int
     image_tokens: int
     state_dict: Mapping[str, Tensor]
 
 
 def _read_checkpoint(path: str | Path) -> _CheckpointContents:
-    """Read a current-format VLA checkpoint and reject superseded heads."""
+    """Read a token-grid VLA checkpoint and reject superseded heads.
+
+    Format 3 heads predict a single step and load with a chunk size of 1.
+    """
     checkpoint = torch.load(path, map_location="cpu", weights_only=True)
     if not isinstance(checkpoint, Mapping):
         raise TypeError("VLA checkpoint must contain a mapping")
     format_version = checkpoint.get("format_version")
-    if format_version != CHECKPOINT_FORMAT_VERSION or isinstance(format_version, bool):
+    if isinstance(format_version, bool) or format_version not in {
+        _SINGLE_STEP_CHECKPOINT_FORMAT,
+        CHECKPOINT_FORMAT_VERSION,
+    }:
         raise ValueError(
             f"VLA checkpoint format {format_version!r} is not supported; formats "
             "before 3 used the superseded last-token head, so retrain the head"
@@ -1161,6 +1403,11 @@ def _read_checkpoint(path: str | Path) -> _CheckpointContents:
         name: checkpoint.get(name)
         for name in ("feature_layer", "hidden_size", "image_tokens")
     }
+    integers["chunk_size"] = (
+        1
+        if format_version == _SINGLE_STEP_CHECKPOINT_FORMAT
+        else checkpoint.get("chunk_size")
+    )
     state_dict = checkpoint.get("state_dict")
     if (
         not isinstance(model_id, str)
@@ -1173,14 +1420,23 @@ def _read_checkpoint(path: str | Path) -> _CheckpointContents:
         or integers["feature_layer"] < 0
         or integers["hidden_size"] < 1
         or integers["image_tokens"] < 1
+        or integers["chunk_size"] < 1
         or not isinstance(state_dict, Mapping)
     ):
         raise ValueError("VLA checkpoint metadata is invalid")
+    if format_version == _SINGLE_STEP_CHECKPOINT_FORMAT:
+        state_dict = {
+            name: (
+                value.reshape(1, 4) if name in {"delta_mean", "delta_std"} else value
+            )
+            for name, value in state_dict.items()
+        }
     return _CheckpointContents(
         model_id=model_id,
         model_revision=model_revision,
         training_profile=training_profile,
         feature_layer=integers["feature_layer"],
+        chunk_size=integers["chunk_size"],
         hidden_size=integers["hidden_size"],
         image_tokens=integers["image_tokens"],
         state_dict=state_dict,
@@ -1193,8 +1449,14 @@ def _load_or_encode(
     config: VLAConfig,
     split: Literal["train", "validation"],
     feature_cache: VLAFeatureCache | None,
+    *,
+    expected_actions: Tensor,
 ) -> tuple[EncodedVLADataset, float, bool]:
-    """Reuse matching cached features or encode one split and cache it."""
+    """Reuse matching cached features or encode one split and cache it.
+
+    A cached split is used only if it reproduces ``expected_actions``, the
+    dataset's current clean action labels, row for row.
+    """
     cache_path: Path | None = None
     key: dict[str, Any] = {}
     if feature_cache is not None:
@@ -1218,17 +1480,16 @@ def _load_or_encode(
         digest = hashlib.sha256(serialized_key.encode("utf-8")).hexdigest()[:16]
         cache_path = feature_cache.directory / f"{split}-{digest}.pt"
         key = json.loads(serialized_key)
-        expected_rows = (
-            len(dataset)
-            if config.max_encoding_samples is None
-            else min(len(dataset), config.max_encoding_samples)
-        )
         if cache_path.is_file():
             cached = torch.load(cache_path, map_location="cpu", weights_only=True)
+            cached_actions = (
+                cached.get("actions") if isinstance(cached, Mapping) else None
+            )
             if (
                 isinstance(cached, Mapping)
                 and cached.get("key") == key
-                and len(cached.get("actions", ())) == expected_rows
+                and isinstance(cached_actions, Tensor)
+                and torch.equal(cached_actions, expected_actions)
             ):
                 encoded = EncodedVLADataset(
                     cached["grid"],
@@ -1248,6 +1509,8 @@ def _load_or_encode(
     )
     _synchronize(encoder.device)
     seconds = time.perf_counter() - started
+    if not torch.equal(encoded.actions, expected_actions):
+        raise ValueError("Encoded VLA rows do not match the dataset's action labels")
     if cache_path is not None:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = cache_path.with_suffix(cache_path.suffix + ".tmp")
@@ -1344,6 +1607,32 @@ def _collate_vla_samples(samples: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _chunk_labels(
+    dataset: Dataset[dict[str, Any]],
+    config: VLAConfig,
+) -> tuple[Tensor, Tensor]:
+    """Read one split's action chunks, truncated like its encoded features."""
+    chunk_method = getattr(dataset, "action_chunks", None)
+    if not callable(chunk_method):
+        raise TypeError("VLA training datasets must provide action_chunks()")
+    chunks, mask = chunk_method(config.chunk_size)
+    count = len(dataset)
+    if (
+        not isinstance(chunks, Tensor)
+        or not isinstance(mask, Tensor)
+        or chunks.shape != (count, config.chunk_size, 5)
+        or mask.shape != (count, config.chunk_size)
+        or mask.dtype != torch.bool
+    ):
+        raise ValueError("VLA action chunks have an invalid shape")
+    rows = (
+        count
+        if config.max_encoding_samples is None
+        else min(count, config.max_encoding_samples)
+    )
+    return chunks[:rows].to(torch.float32), mask[:rows]
+
+
 def _training_statistics(encoded: EncodedVLADataset) -> VLANormalization:
     """Compute input and residual-target statistics from encoded training rows."""
     grid_sum = torch.zeros(
@@ -1360,7 +1649,14 @@ def _training_statistics(encoded: EncodedVLADataset) -> VLANormalization:
     grid_std = (
         (grid_square_sum / token_count - grid_mean.square()).clamp_min(0.0).sqrt()
     )
-    deltas = encoded.actions[:, :4] - encoded.states[:, _TCP_POSE]
+    # Each chunk position has its own statistics: later steps move farther.
+    deltas = (encoded.action_chunks[..., :4] - encoded.states[:, None, _TCP_POSE]).to(
+        torch.float64
+    )
+    weights = encoded.chunk_mask.to(torch.float64).unsqueeze(-1)
+    counts = weights.sum(dim=0).clamp_min(1.0)
+    delta_mean = (deltas * weights).sum(dim=0) / counts
+    delta_std = (((deltas - delta_mean) ** 2 * weights).sum(dim=0) / counts).sqrt()
     return VLANormalization(
         state_mean=encoded.states.mean(dim=0),
         state_std=encoded.states.std(dim=0, unbiased=False).clamp_min(_STATE_STD_FLOOR),
@@ -1370,22 +1666,46 @@ def _training_statistics(encoded: EncodedVLADataset) -> VLANormalization:
         context_std=encoded.context.std(dim=0, unbiased=False).clamp_min(
             _FEATURE_STD_FLOOR
         ),
-        delta_mean=deltas.mean(dim=0),
-        delta_std=deltas.std(dim=0, unbiased=False).clamp_min(_STATE_STD_FLOOR),
+        delta_mean=delta_mean.to(torch.float32),
+        delta_std=delta_std.to(torch.float32).clamp_min(_STATE_STD_FLOOR),
     )
 
 
 def _batch_to_device(
     batch: Mapping[str, Tensor],
     device: torch.device,
-) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-    """Move one encoded batch to the head device as float32 tensors."""
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+    """Move one encoded batch and its action-chunk labels to the head device."""
     return (
         batch["grid"].to(device=device, dtype=torch.float32),
         batch["context"].to(device=device, dtype=torch.float32),
         batch["state"].to(device=device, dtype=torch.float32),
-        batch["action"].to(device=device, dtype=torch.float32),
+        batch["action_chunk"].to(device=device, dtype=torch.float32),
+        batch["chunk_mask"].to(device=device),
     )
+
+
+def _chunk_losses(
+    head: VLAActionHead,
+    output: Tensor,
+    state: Tensor,
+    action_chunk: Tensor,
+    chunk_mask: Tensor,
+    gripper_positive_weight: Tensor,
+) -> tuple[Tensor, Tensor]:
+    """Return masked L1 on normalized deltas and masked weighted gripper BCE."""
+    deltas, logits = head.split_output(output)
+    weights = chunk_mask.to(output.dtype)
+    valid = weights.sum().clamp_min(1.0)
+    delta_error = (deltas - head.delta_targets(state, action_chunk)).abs().mean(dim=-1)
+    gripper_target = _binary_gripper_targets(action_chunk[..., 4].reshape(-1))
+    gripper_bce = F.binary_cross_entropy_with_logits(
+        logits,
+        gripper_target.reshape_as(logits),
+        pos_weight=gripper_positive_weight,
+        reduction="none",
+    )
+    return (delta_error * weights).sum() / valid, (gripper_bce * weights).sum() / valid
 
 
 def _action_errors(prediction: Tensor, action: Tensor) -> Tensor:
@@ -1413,6 +1733,8 @@ def _evaluate_head(
 ) -> _ValidationMetrics:
     """Measure action error, gripper classification, and training objective.
 
+    Action errors and gripper accuracy describe the step executed immediately;
+    ``chunk_l1`` averages the error over every valid position of the chunk.
     With ``ablate_features``, every frozen-VLM input is replaced by its
     training mean, so the gap to the normal result shows how much the head
     relies on vision and language rather than robot state alone.
@@ -1423,32 +1745,49 @@ def _evaluate_head(
     episode_errors: dict[int, list[float]] = {}
     objective_loss_sum = 0.0
     gripper_bce_sum = 0.0
+    chunk_error_sum = 0.0
+    chunk_position_count = 0
     gripper_correct = 0
     sample_count = 0
     with torch.inference_mode():
         for batch in loader:
-            grid, context, state, action = _batch_to_device(batch, device)
+            grid, context, state, action_chunk, chunk_mask = _batch_to_device(
+                batch, device
+            )
             if ablate_features:
                 grid = head.grid_mean[None, :, None, :].expand_as(grid)
                 context = head.context_mean.expand_as(context)
             output = head(grid, context, state)
-            gripper_target = _binary_gripper_targets(action[:, 4])
-            error = _action_errors(head.absolute_action(output, state), action).cpu()
+            predicted_chunk = head.absolute_actions(output, state)
+            action = action_chunk[:, 0]
+            error = _action_errors(predicted_chunk[:, 0], action).cpu()
             if not torch.isfinite(error).all():
                 raise FloatingPointError("VLA validation produced non-finite errors")
-            action_loss = F.l1_loss(output[:, :4], head.delta_targets(state, action))
-            gripper_bce = F.binary_cross_entropy_with_logits(
-                output[:, 4],
-                gripper_target,
-                pos_weight=gripper_positive_weight,
+            chunk_errors = _action_errors(
+                predicted_chunk.reshape(-1, 5),
+                action_chunk.reshape(-1, 5),
+            ).mean(dim=1)
+            valid_positions = chunk_mask.reshape(-1)
+            chunk_error_sum += float(chunk_errors[valid_positions].sum())
+            chunk_position_count += int(valid_positions.sum())
+            action_loss, gripper_bce = _chunk_losses(
+                head,
+                output,
+                state,
+                action_chunk,
+                chunk_mask,
+                gripper_positive_weight,
             )
             objective_loss_sum += float(
                 (1.0 - gripper_loss_weight) * action_loss
                 + gripper_loss_weight * gripper_bce
             ) * len(action)
             gripper_bce_sum += float(gripper_bce) * len(action)
+            gripper_target = _binary_gripper_targets(action[:, 4])
             gripper_correct += int(
-                ((output[:, 4] >= 0.0) == gripper_target.bool()).sum().item()
+                ((predicted_chunk[:, 0, 4] >= 0.0) == gripper_target.bool())
+                .sum()
+                .item()
             )
             sample_count += len(action)
             absolute_errors.append(error)
@@ -1462,6 +1801,7 @@ def _evaluate_head(
     errors = torch.cat(absolute_errors)
     return _ValidationMetrics(
         l1=float(errors.mean()),
+        chunk_l1=chunk_error_sum / max(chunk_position_count, 1),
         action_mae={
             name: float(value)
             for name, value in zip(_ACTION_NAMES, errors.mean(dim=0), strict=True)
@@ -1487,6 +1827,7 @@ class _ValidationMetrics(BaseModel):
     """Hold validation losses during action-head training."""
 
     l1: float
+    chunk_l1: float
     action_mae: dict[str, float]
     episode_l1: dict[str, float]
     objective_loss: float

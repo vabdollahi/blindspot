@@ -186,12 +186,15 @@ def evaluate_limited_vla(
         "image",
         image_size=_IMAGE_SIZE,
     )
-    limited_config_hash = hashlib.sha256(
-        (
-            f"{base_config_hash}:limited-red-blue-two-cubes:"
-            "training-instruction-templates"
-        ).encode()
-    ).hexdigest()
+    limited_configuration = (
+        f"{base_config_hash}:limited-red-blue-two-cubes:training-instruction-templates"
+    )
+    if policy.chunk_size > 1:
+        limited_configuration += (
+            f":chunk={policy.chunk_size}:replan={policy.replan_interval}"
+            f":decay={policy.ensemble_decay!r}"
+        )
+    limited_config_hash = hashlib.sha256(limited_configuration.encode()).hexdigest()
     result = EvaluationResult(
         method=_LIMITED_METHOD,
         task="T3-L",
@@ -303,6 +306,9 @@ def _run_episode(
         model_id=policy.model_id,
         model_revision=policy.model_revision,
         training_profile="limited",
+        chunk_size=policy.chunk_size,
+        replan_interval=policy.replan_interval,
+        ensemble_decay=policy.ensemble_decay,
         git_commit=_git_commit(),
         result=result,
         steps=trajectory_steps,

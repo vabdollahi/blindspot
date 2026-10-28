@@ -253,7 +253,7 @@ The scripted expert remains in the benchmark as a comparison baseline and as a f
 
 **Build.**
 
-- **Frozen-backbone VLA baseline:** freeze the open SmolVLM2-500M checkpoint and train a small action head on T3-L demonstration data. The inputs are both camera views (read as the VLM's image-token grids), proprioception, and the instruction; the head predicts the next TCP change and gripper command, emitted as one shared 5-D action per policy step. This baseline measures direct VLM-feature-to-action mapping; it does not replace SmolVLA.
+- **Frozen-backbone VLA baseline:** freeze the open SmolVLM2-500M checkpoint and train a small action head on T3-L demonstration data. The inputs are both camera views (read as the VLM's image-token grids), proprioception, and the instruction; the head predicts a short chunk of future TCP changes and gripper commands, which the policy blends into one shared 5-D action per policy step. This baseline measures direct VLM-feature-to-action mapping; it does not replace SmolVLA.
 - **SmolVLA:** run a feasibility test on MPS, then fine-tune the pretrained base on T2, T3, and T3-L with the two 256 px cameras and the shared 5-D action. Choose full fine-tuning or LoRA so a run fits in about a day, and profile inference latency and flow-matching steps.
 
 **Experiments.** Record the frozen-backbone baseline's T3-L success, wrong-object rate, and latency. Compare SmolVLA with the RL expert and BC baseline on T2-L1 and T3-L1; train on L1 and test on L2; evaluate T2-H dynamics shift; and measure SmolVLA language grounding on T3-L train and held-out paraphrases.

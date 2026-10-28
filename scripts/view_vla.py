@@ -21,6 +21,17 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--level", choices=("L0", "L1", "L2"), default="L1")
     parser.add_argument("--seed", type=int, default=1_000_000)
     parser.add_argument("--device", default="auto")
+    parser.add_argument(
+        "--replan-interval",
+        type=int,
+        help="Steps between VLM queries for chunked heads (default: 2).",
+    )
+    parser.add_argument(
+        "--ensemble-decay",
+        type=float,
+        default=0.0,
+        help="Weight exp(-decay * age) for overlapping plans; 0 averages them equally.",
+    )
     parser.add_argument("--show-tcp", action="store_true")
     return parser.parse_args()
 
@@ -34,7 +45,12 @@ def main() -> None:
     if arguments.seed < 0:
         raise SystemExit("--seed must be non-negative")
 
-    policy = load_vla_policy(checkpoint, device=arguments.device)
+    policy = load_vla_policy(
+        checkpoint,
+        device=arguments.device,
+        replan_interval=arguments.replan_interval,
+        ensemble_decay=arguments.ensemble_decay,
+    )
     environment = PickPlaceEnv(
         "T3-L",
         arguments.level,
