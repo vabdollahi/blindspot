@@ -1,3 +1,4 @@
+import json
 import random
 from importlib import import_module
 from pathlib import Path
@@ -144,9 +145,7 @@ def test_training_run_writes_reproducibility_record_and_scalar_events(
         run.optimize(loss, model, optimizer, step=1)
         run.log_metrics(1, {"validation/loss": 0.25})
 
-    record = __import__("json").loads(
-        (output_dir / "run.json").read_text(encoding="utf-8")
-    )
+    record = json.loads((output_dir / "run.json").read_text(encoding="utf-8"))
     assert record["status"] == "completed"
     assert record["dataset_id"] == "tiny/train"
     assert record["dataset_version"] == "v1"
@@ -155,3 +154,49 @@ def test_training_run_writes_reproducibility_record_and_scalar_events(
     assert record["config"]["api_key"] == "[REDACTED]"
     event_files = list((output_dir / "tensorboard").glob("events.out.tfevents.*"))
     assert event_files
+
+
+def test_training_run_resumes_in_place_and_preserves_method_metadata(
+    tmp_path: Path,
+) -> None:
+    """Append TensorBoard steps and preserve method-specific run metadata."""
+    pytest.importorskip("tensorboard")
+    output_dir = tmp_path / "run"
+    settings = TrainingSettings(seed=10, device="cpu", precision="auto")
+    seeds = {"train": [1, 2], "validation": [100_000]}
+    with TrainingRun(
+        output_dir,
+        config=TinyTrainingConfig(),
+        dataset_id="tiny/train",
+        dataset_version="v1",
+        seeds=seeds,
+        settings=settings,
+    ) as run:
+        run.log_metrics(3, {"train/loss": 0.5})
+
+    record_path = output_dir / "run.json"
+    previous_record = json.loads(record_path.read_text(encoding="utf-8"))
+    previous_started_at = previous_record["started_at"]
+    previous_record["vla_metadata"] = {"warm_start_count": 0}
+    record_path.write_text(json.dumps(previous_record), encoding="utf-8")
+    with TrainingRun(
+        output_dir,
+        config=TinyTrainingConfig(epochs=3),
+        dataset_id="tiny/train",
+        dataset_version="v1",
+        seeds=seeds,
+        settings=settings,
+        resume_existing=True,
+        step_offset=3,
+    ) as run:
+        run.log_metrics(4, {"train/loss": 0.25})
+
+    resumed_record = json.loads(record_path.read_text(encoding="utf-8"))
+    assert resumed_record["status"] == "completed"
+    assert resumed_record["started_at"] == previous_started_at
+    assert resumed_record["vla_metadata"] == {"warm_start_count": 0}
+    from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+
+    events = EventAccumulator(str(output_dir / "tensorboard"))
+    events.Reload()
+    assert [value.step for value in events.Scalars("train/loss")] == [3, 4]

@@ -1,6 +1,6 @@
 # Blindspot
 
-A simulated Franka Panda arm used as a testbed for robot foundation models. A MuJoCo scene, a scripted expert, and a reinforcement-learning expert provide data and baselines for an exploratory small VLA prototype, a fine-tuned vision-language-action model (SmolVLA), JEPA representations, latent world models with calibrated uncertainty, and distilled policies. The benchmark compares supported methods on shared tasks and seeds. See [the project idea](docs/idea.md) and [the roadmap](docs/roadmap.md).
+A simulated Franka Panda environment for evaluating robot foundation models. A MuJoCo scene, scripted and reinforcement-learning experts, and versioned demonstrations support a frozen-backbone VLA baseline, SmolVLA fine-tuning, JEPA representations, calibrated latent world models, and distilled policies. Methods are compared on shared tasks and seeds. See [the project overview](docs/idea.md) and [the roadmap](docs/roadmap.md).
 
 ## Setup
 
@@ -25,7 +25,7 @@ make verify-training
 
 This is shared run infrastructure, not a replacement for each algorithm's training loop. It lives in `common/training.py`; BC, Stable-Baselines3 PPO, LeRobot, and research models keep their own data pipelines, validation rules, and native checkpoint formats, and connect through thin adapters.
 
-The generic check compares a single-process run with a two-process CPU/Gloo run and verifies exact checkpoint resume. When a trainer starts a `TrainingRun`, it creates its run directory with `run.json` and a `tensorboard/` event directory; the method-specific adapter writes its native checkpoint there. The run record includes config, git commit and dirty-worktree status, seeds, dataset ID/version, hardware, and precision selection/fallback. TensorBoard receives scalar loss, gradient norm, learning rate, and throughput values only—no parameter histograms and no Weights & Biases.
+The generic check compares a single-process run with a two-process CPU/Gloo run and verifies exact checkpoint resume. When a trainer starts a `TrainingRun`, it creates its run directory with `run.json` and a `tensorboard/` event directory; the method-specific adapter writes its native checkpoint there. The run record includes config, git commit and dirty-worktree status, seeds, dataset ID/version, hardware, and precision selection/fallback. TensorBoard records scalar training metrics—including losses, gradient norm, learning rate, and throughput—but no parameter histograms or Weights & Biases.
 
 View all training runs under `checkpoints/` with:
 
@@ -40,6 +40,18 @@ make tensorboard TENSORBOARD_LOGDIR=checkpoints/rl/t2-l1/seed-0-bc-smoke/tensorb
 ```
 
 Open the local URL printed by TensorBoard (usually `http://localhost:6006`). Stop the server with Ctrl-C.
+
+## Frozen-backbone VLA baseline (Phase 3.1)
+
+A language-conditioned T3-L policy that reads frozen SmolVLM2-500M image-token
+features and trains only a 0.38 M-parameter action head. Architecture, data
+selection, training, evaluation, and replay are documented in
+[docs/vla-baseline.md](docs/vla-baseline.md); design rationale and ablations
+are in [docs/decisions.md](docs/decisions.md#frozen-backbone-vla-baseline).
+
+![Frozen-backbone VLA placing the named red cube in the bowl beside a green cube (T3-L1, evaluation seed 1,000,005)](docs/media/t3l-l1-vla-limited.gif)
+
+*Frozen-backbone VLA (limited red/blue profile) on evaluation seed 1,000,005 with the instruction "Place the red cube inside the bowl." and a green cube on the table. From the camera images, instruction, and robot state alone (no object poses), the policy picks the named cube, carries it to the bowl, and releases it. This is a successful episode from the limited-scope diagnostic evaluation; closed-loop grasp timing remains the main failure mode (see [Limitations](docs/vla-baseline.md#limitations)).*
 
 ## Evaluation
 

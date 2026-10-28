@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import platform
@@ -295,8 +296,16 @@ class TrainingRun:
         seeds: Mapping[str, Sequence[int]],
         settings: TrainingSettings,
         distributed_context: DistributedContext | None = None,
+        resume_existing: bool = False,
+        step_offset: int = 0,
     ) -> None:
-        """Create a fresh run directory, run record, and TensorBoard writer."""
+        """Create or resume a run directory, record, and TensorBoard writer."""
+        if isinstance(step_offset, bool) or not isinstance(step_offset, int):
+            raise TypeError("step_offset must be an integer")
+        if step_offset < 0:
+            raise ValueError("step_offset must be non-negative")
+        if not resume_existing and step_offset != 0:
+            raise ValueError("step_offset requires resume_existing=True")
         if not dataset_id.strip() or not dataset_version.strip():
             raise ValueError("dataset_id and dataset_version must be non-empty")
         if not seeds:
@@ -343,9 +352,46 @@ class TrainingRun:
         self._started_monotonic = time.monotonic()
         self._closed = False
         self._writer: Any | None = None
+        self._step_offset = step_offset
+        self._record_extra_fields: dict[str, Any] = {}
+        resumed_started_at: datetime | None = None
+
+        if resume_existing:
+            record_path = self.output_dir / "run.json"
+            tensorboard_dir = self.output_dir / "tensorboard"
+            if not self.output_dir.is_dir():
+                raise FileNotFoundError(
+                    f"Cannot resume missing training directory: {self.output_dir}"
+                )
+            if not record_path.is_file() or not tensorboard_dir.is_dir():
+                raise FileNotFoundError(
+                    "Resuming a run requires its run.json and tensorboard directory"
+                )
+            previous_payload = json.loads(record_path.read_text(encoding="utf-8"))
+            if not isinstance(previous_payload, dict):
+                raise ValueError("Existing run.json must contain a JSON object")
+            record_fields = TrainingRunRecord.model_fields
+            previous_record = TrainingRunRecord.model_validate(
+                {
+                    name: previous_payload[name]
+                    for name in record_fields
+                    if name in previous_payload
+                }
+            )
+            if previous_record.status == "running":
+                raise RuntimeError(
+                    f"Training run is already marked running: {self.output_dir}"
+                )
+            resumed_started_at = previous_record.started_at
+            self._record_extra_fields = {
+                name: value
+                for name, value in previous_payload.items()
+                if name not in record_fields
+            }
 
         if self.distributed.is_main_process:
-            self.output_dir.mkdir(parents=True, exist_ok=False)
+            if not resume_existing:
+                self.output_dir.mkdir(parents=True, exist_ok=False)
             self._writer = SummaryWriter(log_dir=str(self.output_dir / "tensorboard"))
 
         self._barrier()
@@ -361,10 +407,14 @@ class TrainingRun:
             requested_precision=settings.precision,
             precision=self.precision,
             precision_fallback=fallback,
-            started_at=datetime.now(UTC),
+            started_at=resumed_started_at or datetime.now(UTC),
         )
         if self.distributed.is_main_process:
-            _write_json_atomic(self.output_dir / "run.json", self.record)
+            _write_json_atomic(
+                self.output_dir / "run.json",
+                self.record,
+                extra_fields=self._record_extra_fields,
+            )
 
     def __enter__(self) -> Self:
         """Return this run for use as a context manager."""
@@ -442,6 +492,10 @@ class TrainingRun:
         """Write finite scalar metrics, learning rates, and throughput to TensorBoard."""
         if isinstance(step, bool) or not isinstance(step, int) or step < 0:
             raise ValueError("step must be a non-negative integer")
+        if step < self._step_offset:
+            raise ValueError(
+                f"step {step} is less than the resume offset {self._step_offset}"
+            )
         if not self.distributed.is_main_process:
             return
         if self._closed or self._writer is None:
@@ -451,7 +505,7 @@ class TrainingRun:
             if not name.strip():
                 raise ValueError("Metric names must be non-empty")
             values[name] = _finite_scalar(value, name, step)
-        values["train/steps_per_second"] = step / max(
+        values["train/steps_per_second"] = (step - self._step_offset) / max(
             time.monotonic() - self._started_monotonic, 1e-9
         )
         if optimizer is not None:
@@ -499,7 +553,11 @@ class TrainingRun:
                     "error_type": error_type,
                 }
             )
-            _write_json_atomic(self.output_dir / "run.json", self.record)
+            _write_json_atomic(
+                self.output_dir / "run.json",
+                self.record,
+                extra_fields=self._record_extra_fields,
+            )
         self._barrier()
         self._closed = True
 
@@ -723,10 +781,21 @@ def _hardware_info(device: torch.device) -> dict[str, str | bool | int]:
     return hardware
 
 
-def _write_json_atomic(path: Path, record: TrainingRunRecord) -> None:
+def _write_json_atomic(
+    path: Path,
+    record: TrainingRunRecord,
+    *,
+    extra_fields: Mapping[str, Any] | None = None,
+) -> None:
     """Persist a validated run record without exposing a partial JSON file."""
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(record.model_dump_json(indent=2) + "\n", encoding="utf-8")
+    if extra_fields:
+        payload = record.model_dump(mode="json")
+        payload.update(extra_fields)
+        contents = json.dumps(payload, indent=2) + "\n"
+    else:
+        contents = record.model_dump_json(indent=2) + "\n"
+    temporary.write_text(contents, encoding="utf-8")
     temporary.replace(path)
 
 

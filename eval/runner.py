@@ -42,6 +42,7 @@ def evaluate(
     workers: int | None = None,
     method: str | None = None,
     results_dir: str | Path | None = None,
+    image_size: int | None = None,
 ) -> EvaluationResult:
     """Run seeded episodes in isolated workers and write a deterministic JSON result."""
     normalized_task = _normalize_task(task)
@@ -51,6 +52,15 @@ def evaluate(
         raise ValueError(f"Unsupported level {level!r}")
     if obs_mode not in {"state", "image"}:
         raise ValueError("obs_mode must be 'state' or 'image'")
+    if image_size is not None:
+        if obs_mode != "image":
+            raise ValueError("image_size can be set only when obs_mode='image'")
+        if (
+            isinstance(image_size, bool)
+            or not isinstance(image_size, int)
+            or image_size < 1
+        ):
+            raise ValueError("image_size must be a positive integer")
     normalized_obs_mode = cast(Literal["state", "image"], obs_mode)
     episode_seeds = _validate_seeds(seeds)
     method_name = _method_name(method or policy.__class__.__name__)
@@ -67,7 +77,13 @@ def evaluate(
         max_workers=worker_count,
         mp_context=context,
         initializer=_initialize_worker,
-        initargs=(policy_payload, normalized_task, level, normalized_obs_mode),
+        initargs=(
+            policy_payload,
+            normalized_task,
+            level,
+            normalized_obs_mode,
+            image_size,
+        ),
     ) as executor:
         episodes = list(
             tqdm(
@@ -99,7 +115,12 @@ def evaluate(
         obs_mode=normalized_obs_mode,
         seeds=list(episode_seeds),
         git_commit=_git_commit(),
-        config_hash=_config_hash(normalized_task, level, normalized_obs_mode),
+        config_hash=_config_hash(
+            normalized_task,
+            level,
+            normalized_obs_mode,
+            image_size=image_size,
+        ),
         summary=summary,
         episodes=episodes,
     )
@@ -124,11 +145,20 @@ def _initialize_worker(
     task: str,
     level: str,
     obs_mode: str,
+    image_size: int | None = None,
 ) -> None:
     """Create one policy and one environment inside each spawned worker."""
     global _WORKER_ENV, _WORKER_POLICY
     _WORKER_POLICY = pickle.loads(policy_payload)
-    _WORKER_ENV = PickPlaceEnv(task, level, obs_mode)
+    if image_size is None:
+        _WORKER_ENV = PickPlaceEnv(task, level, obs_mode)
+    else:
+        _WORKER_ENV = PickPlaceEnv(
+            task,
+            level,
+            obs_mode,
+            image_size=image_size,
+        )
     atexit.register(_close_worker_environment)
 
 
@@ -267,7 +297,13 @@ def _git_commit() -> str:
     return completed.stdout.strip() or "unknown"
 
 
-def _config_hash(task: str, level: str, obs_mode: str) -> str:
+def _config_hash(
+    task: str,
+    level: str,
+    obs_mode: str,
+    *,
+    image_size: int | None = None,
+) -> str:
     """Hash the task/level YAML inputs and observation-mode configuration."""
     digest = hashlib.sha256()
     config_dir = _PROJECT_ROOT / "envs" / "configs"
@@ -277,9 +313,12 @@ def _config_hash(task: str, level: str, obs_mode: str) -> str:
     for filename in filenames:
         digest.update(filename.encode("utf-8"))
         digest.update((config_dir / filename).read_bytes())
+    configuration = {"task": task, "level": level, "obs_mode": obs_mode}
+    if image_size is not None:
+        configuration["image_size"] = image_size
     digest.update(
         json.dumps(
-            {"task": task, "level": level, "obs_mode": obs_mode},
+            configuration,
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")

@@ -5,9 +5,10 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pytest
 
 from eval.report import build_report
-from eval.runner import _seed_policy_rngs, evaluate
+from eval.runner import _config_hash, _seed_policy_rngs, evaluate
 from skills.expert import ScriptedExpert
 
 
@@ -99,6 +100,24 @@ def test_t2h_is_available_through_the_shared_evaluation_harness(
     assert result.level == "L1"
     assert result.episodes[0].failure_reason == "policy_error"
     assert (tmp_path / "rl-t2-checkpoint" / "T2-H-L1.json").is_file()
+
+
+def test_evaluation_image_size_is_validated_and_included_in_config_hash() -> None:
+    """Distinguish VLA resolution from the default BC image resolution."""
+    assert _config_hash("T3-L", "L1", "image", image_size=256) != _config_hash(
+        "T3-L", "L1", "image", image_size=128
+    )
+    with pytest.raises(ValueError, match="only when obs_mode='image'"):
+        evaluate(OSErrorPolicy(), "T3-L", "L1", [1_000_006], image_size=256)
+    with pytest.raises(ValueError, match="positive integer"):
+        evaluate(
+            OSErrorPolicy(),
+            "T3-L",
+            "L1",
+            [1_000_006],
+            obs_mode="image",
+            image_size=0,
+        )
 
 
 def test_parallel_evaluation_writes_reproducible_episode_json(

@@ -1,4 +1,4 @@
-.PHONY: setup test lint view-scene view-control view-expert view-bc view-rl evaluate baseline evaluate-bc report benchmark-scene benchmark-rl-env demos interaction interaction-coverage train-bc train-rl evaluate-rl verify-training tensorboard
+.PHONY: setup test lint view-scene view-control view-expert view-bc view-rl view-vla render-vla-trajectory evaluate baseline evaluate-bc report benchmark-scene benchmark-rl-env demos interaction interaction-coverage train-bc train-rl evaluate-rl train-vla evaluate-vla smoke-vla verify-training tensorboard
 
 INTERACTION_COVERAGE_ARGS ?= data/datasets/interaction-l1/collection.json
 TENSORBOARD_LOGDIR ?= checkpoints
@@ -6,9 +6,11 @@ TENSORBOARD_LOGDIR ?= checkpoints
 ifeq ($(shell uname -s),Darwin)
 VIEWER_PYTHON := uv run mjpython
 BC_VIEWER_PYTHON := mjpython
+VLA_VIEWER_PYTHON := uv run --locked --extra vla mjpython
 else
 VIEWER_PYTHON := uv run python
 BC_VIEWER_PYTHON := python
+VLA_VIEWER_PYTHON := uv run --locked --extra vla python
 endif
 
 setup:
@@ -35,6 +37,12 @@ view-bc:
 
 view-rl:
 	uv run --locked --extra rl $(BC_VIEWER_PYTHON) scripts/view_rl.py $(RL_VIEW_ARGS)
+
+view-vla:
+	$(VLA_VIEWER_PYTHON) scripts/view_vla.py $(VLA_VIEW_ARGS)
+
+render-vla-trajectory:
+	$(VLA_VIEWER_PYTHON) scripts/render_vla_trajectory.py $(VLA_RENDER_ARGS)
 
 evaluate:
 	uv run --locked python scripts/evaluate.py $(EVALUATE_ARGS)
@@ -71,6 +79,15 @@ train-rl:
 
 evaluate-rl:
 	uv run --locked --extra rl python scripts/evaluate_rl.py $(RL_EVAL_ARGS)
+
+train-vla:
+	uv run --locked --extra vla python scripts/train_vla.py $(VLA_ARGS)
+
+evaluate-vla:
+	$(VLA_VIEWER_PYTHON) scripts/evaluate_vla.py $(VLA_EVAL_ARGS)
+
+smoke-vla:
+	$(VLA_VIEWER_PYTHON) scripts/smoke_vla.py $(VLA_SMOKE_ARGS)
 
 verify-training:
 	uv run --locked --extra training python scripts/verify_training.py
