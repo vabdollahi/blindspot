@@ -228,3 +228,5 @@ checkpoints/
 outputs/
 videos/
 eval/results/
+# macOS Finder metadata
+.DS_Store
