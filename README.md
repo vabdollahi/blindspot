@@ -1,6 +1,6 @@
 # Blindspot
 
-A simulated Franka Panda environment for evaluating robot foundation models. A MuJoCo scene, scripted and reinforcement-learning experts, and versioned demonstrations support a frozen-backbone VLA baseline, SmolVLA fine-tuning, JEPA representations, calibrated latent world models, and distilled policies. Methods are compared on shared tasks and seeds. See [the project overview](docs/idea.md) and [the roadmap](docs/roadmap.md).
+A simulated Franka Panda environment for evaluating robot foundation models. A MuJoCo scene, scripted and reinforcement-learning experts, and versioned demonstrations support a frozen-backbone VLA baseline, JEPA representations, calibrated latent world models, and distilled policies. Methods are compared on shared tasks and seeds. See [the project overview](docs/idea.md) and [the roadmap](docs/roadmap.md).
 
 ## Setup
 

@@ -6,7 +6,7 @@ images. A 0.39 M-parameter action head, the only trained component, maps those
 features and the robot state to a 0.5 s chunk of future actions, which the
 policy blends into the shared 5-D action at 20 Hz. The baseline
 measures how far frozen VLM features go toward closed-loop control without
-fine-tuning the VLM; SmolVLA (Phase 3.2–3.3) is the fine-tuned comparison.
+fine-tuning the VLM.
 
 Design rationale and supporting measurements are recorded in
 [decisions.md](decisions.md#frozen-backbone-vla-baseline). Each training

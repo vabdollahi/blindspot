@@ -1,25 +1,24 @@
-# Copilot Instructions — Language-Driven Pick-and-Place Agent
+# Copilot Instructions — Robot Foundation Models Testbed
 
 > **Audience: AI agents.** Terse rules; every line carries signal.
 
 ## General
 
 - No filler. Start with the answer; match length to complexity.
-- Never fill knowledge gaps with plausible-sounding information. `mujoco`, `mink`, `lerobot`, and model-serving APIs change between versions: verify against the pinned version and flag uncertainty.
+- Never fill knowledge gaps with plausible-sounding information. `mujoco`, `mink`, `lerobot`, and `transformers` APIs change between versions: verify against the pinned version and flag uncertainty.
 - Ask before changing anything in `docs/roadmap.md` §3 (fixed design decisions), §4 (tasks and success predicates), or §5 (evaluation rules). Offer options with trade-offs.
 - Do not add scope beyond `docs/roadmap.md`. Note worthwhile follow-ups at the end of a response instead.
 
 ## Project
 
-- Simulated Franka Panda (MuJoCo) as a testbed for robot foundation models. Layers: environment + scripted expert → RL expert (PPO) → data engine → VLA (SmolVLA) → representations (DINOv2, V-JEPA 2, in-domain JEPA) → latent world models (uncertainty, planning, policy evaluation) → distillation and efficient inference → compact LLM agent.
+- Simulated Franka Panda (MuJoCo) as a testbed for robot foundation models. Layers: environment + scripted expert → RL expert (PPO) → data engine → frozen-backbone VLA baseline (SmolVLM2 plus action head) → representations (DINOv2, V-JEPA 2, in-domain JEPA) → latent world models (uncertainty, planning, policy evaluation) → distillation and efficient inference.
 - Sources of truth: `docs/roadmap.md` (build steps, decisions, tasks, evaluation rules), `docs/idea.md` (design rationale), `docs/decisions.md` (design rationale), `docs/conventions.md` (frames and units).
 - Out of scope: custom kinematics, dynamics, or controllers. Motion is `mink` IK plus MuJoCo position servos.
 
 ## Stack
 
 - Python 3.12 with `uv` only (never `pip`); `uv.lock` is committed.
-- `mujoco` 3.x, MuJoCo Menagerie as a pinned submodule in `third_party/`, `mink`, `gymnasium`, `stable-baselines3`, PyTorch (MPS), `lerobot` (pinned), `transformers` (pinned, pretrained encoders), `onnxruntime`, `pydantic`, `openai` client for OpenAI-compatible model servers.
-- Model servers (Ollama, LM Studio, `mlx-lm`/`mlx-vlm`) run in a separate environment and are reached only over HTTP. Never import them into the simulation/training environment.
+- `mujoco` 3.x, MuJoCo Menagerie as a pinned submodule in `third_party/`, `mink`, `gymnasium`, `stable-baselines3`, PyTorch (MPS), `lerobot` (pinned), `transformers` (pinned, pretrained encoders), `onnxruntime`, `pydantic`.
 
 ## Conventions (must hold everywhere)
 
@@ -54,15 +53,10 @@
 
 ## Secrets
 
-- API keys (frontier models, Hugging Face) come from environment variables or a gitignored `.env`; commit `.env.example` only.
+- API keys (for example, Hugging Face) come from environment variables or a gitignored `.env`; commit `.env.example` only.
 - Never write secrets to code, configs, logs, run records, or results JSON.
-
-## LLM/VLM agent
-
-- Planner output is validated against the Pydantic `Plan` schema; reject unknown object IDs and retry with the validation error.
-- Instructions and other external text go in user messages, clearly delimited; never interpolate them into system prompts.
 
 ## Maintenance
 
 - When a decision, task definition, or evaluation rule changes, update `docs/roadmap.md`, `docs/idea.md`, and `docs/decisions.md` together.
-- Skills in `.github/skills/` are living documents. Record non-obvious, recurring gotchas (for example grasp tuning or LeRobot/SmolVLA integration) in the relevant skill; create a new skill only for substantial, repeatable procedures.
+- Skills in `.github/skills/` are living documents. Record non-obvious, recurring gotchas (for example grasp tuning or LeRobot integration) in the relevant skill; create a new skill only for substantial, repeatable procedures.
