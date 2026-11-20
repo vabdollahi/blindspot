@@ -2,12 +2,15 @@ from collections import Counter
 from pathlib import Path
 
 import numpy as np
+import pytest
+from pydantic import ValidationError
 
 from data.interaction import (
     SOURCE_IDS,
     InteractionConfig,
     action_coverage_summary,
     build_episode_requests,
+    default_dataset_name,
     interaction_dataset_features,
     interaction_task_label,
     plot_action_coverage,
@@ -58,6 +61,38 @@ def test_interaction_requests_balance_tasks_and_sources() -> None:
         if request.requested_source != "scripted-exploration"
     )
     assert requests[0].checkpoint_sha256 is not None
+
+
+def test_held_out_requests_filter_tasks_and_use_the_requested_seed_split() -> None:
+    """A T3-only evaluation collection balances sources on evaluation seeds."""
+    config = InteractionConfig(episodes=20, tasks=("T3",), seed_split="evaluation")
+    experts = {"T3": Path("/checkpoints/T3/best")}
+    intermediate = {"T3": [Path("/checkpoints/T3/step_100")]}
+    digests = {experts["T3"]: "sha-expert", intermediate["T3"][0]: "sha-step"}
+
+    requests = build_episode_requests(config, experts, intermediate, digests)
+
+    assert {request.task for request in requests} == {"T3"}
+    assert [request.seed for request in requests] == list(range(1_000_000, 1_000_020))
+    assert Counter(request.requested_source for request in requests) == {
+        "rl-expert": 5,
+        "rl-expert-noisy": 5,
+        "intermediate-ppo": 5,
+        "scripted-exploration": 5,
+    }
+    assert default_dataset_name(config) == "interaction-t3-l1-evaluation"
+    assert default_dataset_name(InteractionConfig(episodes=12)) == "interaction-l1"
+
+
+def test_interaction_seeds_must_stay_inside_their_split() -> None:
+    """Training corpora never reach validation seeds, and held-out sets never train seeds."""
+    assert InteractionConfig(episodes=12, seed_split="validation").seed_start == 100_000
+    with pytest.raises(ValidationError):
+        InteractionConfig(episodes=20, seed_start=99_990)
+    with pytest.raises(ValidationError):
+        InteractionConfig(episodes=20, seed_split="validation", seed_start=0)
+    with pytest.raises(ValidationError):
+        InteractionConfig(episodes=20, tasks=())
 
 
 def test_interaction_schema_records_sources_and_next_step_success() -> None:

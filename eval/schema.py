@@ -54,3 +54,103 @@ class EvaluationResult(BaseModel):
     def json_dict(self) -> dict[str, Any]:
         """Return the JSON-compatible representation of the result."""
         return self.model_dump(mode="json")
+
+
+class MetricEstimate(BaseModel):
+    """A point estimate with an optional bootstrap interval and per-seed values."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    value: float
+    ci_low: float | None = None
+    ci_high: float | None = None
+    per_seed: list[float] = Field(default_factory=list)
+
+
+class ProbeEncoder(BaseModel):
+    """Identify one probed encoder and where its weights came from."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    kind: Literal["random", "jepa", "supervised", "pretrained"]
+    seeds: list[int]
+    parameters: int = Field(ge=0)
+    sources: list[str]
+
+
+class ProbeRow(BaseModel):
+    """Probe metrics for one encoder, readout, and probe model on one split."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    encoder: str
+    readout: Literal["latent", "global", "grid", "output"]
+    probe: Literal["linear", "mlp", "trained"]
+    split: Literal["validation", "test"]
+    metrics: dict[str, MetricEstimate]
+
+
+class TrainingCurvePoint(BaseModel):
+    """One periodic validation record copied from a JEPA run."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    step: int
+    probe_score: float
+    effective_rank: float | None = None
+    latent_std: float | None = None
+    persistence_ratio: float | None = None
+    gate_magnitude: float | None = None
+
+
+class JEPAProbeResult(BaseModel):
+    """Phase 4 probe study results, written by scripts/evaluate_jepa.py."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    task: Literal["T3"] = "T3"
+    level: Literal["L1"] = "L1"
+    git_commit: str
+    train_datasets: list[str]
+    validation_dataset: str
+    test_dataset: str
+    train_timesteps: int
+    test_episodes: int
+    resamples: int
+    encoders: list[ProbeEncoder]
+    rows: list[ProbeRow]
+    h1_pass: bool | None
+    phase6_encoder: str | None
+    validation_probe_scores: dict[str, float] = Field(default_factory=dict)
+    training_curves: dict[str, list[TrainingCurvePoint]]
+
+
+class RolloutCurve(BaseModel):
+    """Decoded error against horizon for one model, target, and phase."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    model: Literal["predictor", "persistence", "probe_floor"]
+    target: Literal["cube_xyz", "tcp_xyz"]
+    phase: Literal["all", "free_motion", "held", "after_release"]
+    errors_cm: list[MetricEstimate]
+
+
+class JEPARolloutResult(BaseModel):
+    """Phase 4 predictor rollout results, written by scripts/evaluate_jepa.py."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    task: Literal["T3"] = "T3"
+    level: Literal["L1"] = "L1"
+    git_commit: str
+    runs: list[str]
+    test_dataset: str
+    horizons_seconds: list[float]
+    windows: int
+    curves: list[RolloutCurve]
+    latent_mse_vs_persistence: list[MetricEstimate]
+    h4_pass: bool

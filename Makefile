@@ -1,4 +1,4 @@
-.PHONY: setup test lint view-scene view-control view-expert view-bc view-rl view-vla render-vla-trajectory evaluate baseline evaluate-bc report benchmark-scene benchmark-rl-env demos interaction interaction-coverage train-bc train-rl evaluate-rl train-vla evaluate-vla smoke-vla verify-training tensorboard
+.PHONY: setup test lint view-scene view-control view-expert view-bc view-rl view-vla render-vla-trajectory evaluate baseline evaluate-bc report benchmark-scene benchmark-rl-env demos interaction interaction-coverage train-bc train-rl evaluate-rl train-vla evaluate-vla smoke-vla jepa-data train-jepa evaluate-jepa verify-training tensorboard
 
 INTERACTION_COVERAGE_ARGS ?= data/datasets/interaction-l1/collection.json
 TENSORBOARD_LOGDIR ?= checkpoints
@@ -88,6 +88,17 @@ evaluate-vla:
 
 smoke-vla:
 	$(VLA_VIEWER_PYTHON) scripts/smoke_vla.py $(VLA_SMOKE_ARGS)
+
+jepa-data:
+	[ -d data/datasets/t3-l1-probe-val ] || uv run --locked --extra jepa --extra imitation --extra rl python -m data.interaction --tasks T3 --seed-split validation --episodes 100 --dataset-name t3-l1-probe-val
+	[ -d data/datasets/t3-l1-probe-test ] || uv run --locked --extra jepa --extra imitation --extra rl python -m data.interaction --tasks T3 --seed-split evaluation --episodes 200 --dataset-name t3-l1-probe-test
+	uv run --locked --extra jepa python -m encoders.frames interaction-l1 t3-l1 t3-l1-probe-val t3-l1-probe-test
+
+train-jepa:
+	uv run --locked --extra jepa python scripts/train_jepa.py $(JEPA_ARGS)
+
+evaluate-jepa:
+	uv run --locked --extra jepa python scripts/evaluate_jepa.py $(JEPA_EVAL_ARGS)
 
 verify-training:
 	uv run --locked --extra training python scripts/verify_training.py

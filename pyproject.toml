@@ -45,6 +45,14 @@ vla = [
     "transformers==5.20.2",
 ]
 
+jepa = [
+    "huggingface-hub>=1.0,<2",
+    "lerobot[dataset]==0.6.1",
+    "tensorboard>=2.19,<3",
+    "torch>=2.10,<2.12",
+    "transformers==5.20.2",
+]
+
 [dependency-groups]
 dev = ["pytest>=8.3,<9", "ruff>=0.11,<1"]
 
@@ -58,7 +66,7 @@ extend-exclude = ["third_party"]
 "eval/vla_profile.py" = ["BLE001"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["common", "envs", "motion", "skills", "data", "policies", "eval"]
+packages = ["common", "envs", "motion", "skills", "data", "policies", "encoders", "eval"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

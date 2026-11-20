@@ -11,7 +11,7 @@
 
 ## Project
 
-- Simulated Franka Panda (MuJoCo) as a testbed for robot foundation models. Layers: environment + scripted expert → RL expert (PPO) → data engine → frozen-backbone VLA baseline (SmolVLM2 plus action head) → representations (DINOv2, V-JEPA 2, in-domain JEPA) → latent world models (uncertainty, planning, policy evaluation) → distillation and efficient inference.
+- Simulated Franka Panda (MuJoCo) as a testbed for robot foundation models. Layers: environment + scripted expert → RL expert (PPO) → data engine → frozen-backbone VLA baseline (SmolVLM2 plus action head) → in-domain JEPA on T3-L1 probed against frozen DINOv2 (`docs/jepa.md`) → latent world models (uncertainty, planning, policy evaluation, flow-matching frame decoder, scenario generation) → distillation and efficient inference. Laptop-only compute (M3 Max).
 - Sources of truth: `docs/roadmap.md` (build steps, decisions, tasks, evaluation rules), `docs/idea.md` (design rationale), `docs/decisions.md` (design rationale), `docs/conventions.md` (frames and units).
 - Out of scope: custom kinematics, dynamics, or controllers. Motion is `mink` IK plus MuJoCo position servos.
 

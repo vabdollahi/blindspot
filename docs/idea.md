@@ -1,6 +1,6 @@
 # Robot Foundation Models Testbed
 
-A simulated robot arm for controlled evaluation of robot foundation models: a frozen-backbone VLA baseline built from a pretrained vision-language model, JEPA representations, calibrated latent world models, and distillation into efficient policies. Scripted and reinforcement-learning experts provide demonstrations and baselines; benchmarked methods share tasks and seeds.
+A simulated robot arm for controlled evaluation of robot foundation models: a frozen-backbone VLA baseline built from a pretrained vision-language model, JEPA representations, calibrated latent world models with a generative frame decoder and scenario generation for stress testing, and distillation into efficient policies and samplers. Scripted and reinforcement-learning experts provide demonstrations and baselines; benchmarked methods share tasks and seeds.
 
 ---
 
@@ -8,9 +8,9 @@ A simulated robot arm for controlled evaluation of robot foundation models: a fr
 
 **Motivation.** Robot foundation models are usually demonstrated one at a time, on different robots and tasks, with results that are hard to compare. This project builds them side by side in one simulator, where ground truth is available for everything: object poses for probing representations, the simulator itself as a physics-based model to benchmark learned world models against, and exact success predicates for every evaluation.
 
-**Focus.** A frozen-backbone VLA baseline built from pretrained VLM features and a learned action head, self-supervised visual representations (JEPA), action-conditioned latent world models (prediction, uncertainty, out-of-distribution detection, planning, and policy evaluation), and distillation with efficient inference. The project contains no kinematics, dynamics, or control code. An off-the-shelf IK library (`mink`) maps end-effector targets to joint targets, and MuJoCo's position servos track them.
+**Focus.** A frozen-backbone VLA baseline built from pretrained VLM features and a learned action head, self-supervised visual representations (JEPA), action-conditioned latent world models (prediction, uncertainty, out-of-distribution detection, planning, and policy evaluation), generative modeling (a flow-matching decoder that renders imagined rollouts, and step distillation of its sampler), scenario generation that searches for failure-inducing test scenes, and distillation with efficient inference. The project contains no kinematics, dynamics, or control code. An off-the-shelf IK library (`mink`) maps end-effector targets to joint targets, and MuJoCo's position servos track them.
 
-**Reference hardware.** A single Apple Silicon laptop (M3 Max, 36 GB unified memory). No robot and no NVIDIA GPU are used; every model is sized to train on this machine, and the training code is distributed-ready for larger hardware.
+**Reference hardware.** A single Apple Silicon laptop (M3 Max, 36 GB unified memory). No robot and no NVIDIA GPU are used; every model is sized to train on this machine, and the training code is distributed-ready for larger hardware. Frozen-backbone features are cached once and reused, and expensive encoders are trained once per configuration, so each training run takes about an hour (estimated; measured values are recorded in `decisions.md`).
 
 **What the project covers.**
 
@@ -20,8 +20,9 @@ A simulated robot arm for controlled evaluation of robot foundation models: a fr
 | Reinforcement learning | Phase 1b: PPO trained from scratch into a privileged-state expert, the demonstrator and distillation teacher |
 | Data engine | Phase 2: versioned LeRobot datasets with language labels, an interaction corpus for world models, and shared training infrastructure |
 | Vision-language-action models | Phase 3: a frozen SmolVLM2-500M with a learned action head, evaluated on language grounding and under distribution shift |
-| Representations and JEPA | Phase 4: ResNet-18, DINOv2, V-JEPA 2, and an in-domain JEPA compared by probing and as policy backbones |
+| In-domain JEPA | Phase 4: a LeWorldModel-style JEPA trained from scratch on T3-L1, probed for task state against a random encoder, a supervised encoder, and frozen DINOv2 ([`jepa.md`](jepa.md)) |
 | World models | Phase 5: latent dynamics ensembles with calibrated uncertainty and OOD signals, a validity map, physics-based baselines, CEM planning, and policy evaluation in imagination |
+| Generative models and scenario generation | Phase 5: a latent flow-matching decoder that renders imagined rollouts, scored by the physical state recovered from its frames, with a distilled few-step sampler; and a surrogate-guided search for scenes that make the VLA fail, verified in MuJoCo |
 | Distillation and inference | Phase 6: privileged-teacher distillation with DAgger and ONNX latency benchmarks |
 | Reproducible evaluation | A cross-model benchmark with confidence intervals, one-command regeneration, and a test suite |
 
@@ -33,13 +34,14 @@ A simulated robot arm for controlled evaluation of robot foundation models: a fr
 
 1. A public repo where `make setup && make smoke` finishes in under 30 minutes from a clean clone. This excludes model-weight downloads and training. The smoke target runs the unit tests and one short run per layer.
 2. Unit tests for the environment: determinism, success predicates, and camera projection.
-3. A policy benchmark comparing the scripted expert, the RL expert, the BC baselines, the frozen-backbone VLA, encoder-backbone policies, distilled students, and world-model planning on shared tasks and seeds, with 95% confidence intervals, parameter counts, and latency.
+3. A policy benchmark comparing the scripted expert, the RL expert, the BC baselines, the frozen-backbone VLA, distilled students, and world-model planning on shared tasks and seeds, with 95% confidence intervals, parameter counts, and latency.
 4. A world-model report: prediction error against physics-based models, calibrated uncertainty, out-of-distribution detection, a validity map, planning results, and policy-evaluation correlation.
-5. A representation study and a distillation study with a success-latency-size trade-off.
-6. A demo video (about 2 minutes): the world model's imagined rollout next to the real execution, a CEM-planned episode, and the results tables.
-7. A technical write-up (README plus report) with ablations and a limitations section.
+5. A generative-decoder report (physical consistency of decoded rollouts, and its quality-latency trade-off under step distillation) and a scenario-generation report (verified failures found per rollout against uniform sampling).
+6. A representation study (an in-domain JEPA probed against frozen DINOv2) and a distillation study with a success-latency-size trade-off.
+7. A demo video (about 2 minutes): the world model's imagined rollout, decoded to frames, next to the real execution, a CEM-planned episode, a generated failure scenario, and the results tables.
+8. A technical write-up (README plus report) with ablations and a limitations section.
 
-**Non-goals.** Real hardware, sim-to-real transfer, novel algorithms, a production system, collision-aware motion planning beyond simple approach and retreat waypoints, implementing kinematics, dynamics, or controllers, pretraining VLMs or training large VLAs and world models from scratch, and multi-GPU training at scale. The Phase 3 baseline freezes a pretrained small VLM and trains only a supervised action head.
+**Non-goals.** Real hardware, sim-to-real transfer, novel algorithms, a production system, collision-aware motion planning beyond simple approach and retreat waypoints, implementing kinematics, dynamics, or controllers, pretraining VLMs or training large VLAs, world models, or generative video models from scratch, and multi-GPU training at scale. The Phase 3 baseline freezes a pretrained small VLM and trains only a supervised action head.
 
 ---
 
@@ -75,7 +77,7 @@ Also add a **TCP site** between the fingertips. That site is the `ee` frame.
 
 - **Learned-policy action (5-D):** an absolute TCP target in the `base` frame, given as position (3) plus yaw (1) with the gripper pointing straight down, plus a gripper command (1). Top-down grasps are enough for cubes and a bowl, and they avoid rotation-representation problems. ACT predicts absolute targets, and the Diffusion Policy paper reports that position control beats velocity control. IK and the position servos (§3.3) track this target. The VLA and every distilled student use the same action space, so all policies compare directly.
 - **Phase 1b RL policy action:** a bounded delta from the controller's current TCP target (xyz up to one 1.25 cm rate-limit step, yaw up to 0.05 rad) plus a binary gripper. The RL wrapper, and the frozen policy's `Policy.act`, integrate it into the absolute action above. Deltas make holding still and millimeter precision closed-loop and keep exploration local, whereas absolute targets leave both open-loop and dominated by exploration noise.
-- **Image-policy observation:** front RGB plus wrist RGB at 256×256 for every dataset from Phase 2 on (the earlier BC baselines use 128×128), plus proprioception (joint positions, TCP pose, gripper width). Pretrained encoders (DINOv2, V-JEPA 2) expect 224-256 px inputs, and the cubes span only a few pixels at 128 px in the front view.
+- **Image-policy observation:** front RGB plus wrist RGB at 256×256 for every dataset from Phase 2 on (the earlier BC baselines use 128×128), plus proprioception (joint positions, TCP pose, gripper width). Pretrained encoders such as DINOv2 expect about 224 px inputs, and the cubes span only a few pixels at 128 px in the front view.
 - **State-policy observation:** proprioception, object poses (noisy under T2-H), target pose, and gripper state.
 - The BC baselines and the students distilled from the RL expert are **not** language-conditioned, so object identities that define a task are fixed by color for them (T4: red on blue). The frozen-backbone VLA baseline uses language on T3-L.
 
@@ -96,7 +98,7 @@ Four layers. Each one runs on its own and is evaluated on its own. The architect
 1. **Physics and robot.** A MuJoCo scene, built with `MjSpec`, containing the Panda, a table, colored cubes, a bowl, a front camera, and a wrist camera.
 2. **Motion and skills.** Off-the-shelf IK (`mink`) and MuJoCo's position servos, wrapped as parameterized skills and a scripted expert.
 3. **Experts and data.** A PPO expert trained on privileged state, and a data engine that turns it into versioned demonstration datasets and an interaction corpus.
-4. **Learned models.** A frozen-backbone VLA baseline; frozen and in-domain JEPA encoders with probes; latent world models with uncertainty, planning, and policy evaluation; and distilled students. Every policy shares one action interface.
+4. **Learned models.** A frozen-backbone VLA baseline; an in-domain JEPA probed against frozen DINOv2; latent world models with uncertainty, planning, policy evaluation, a generative frame decoder, and scenario generation; and distilled students. Every policy shares one action interface.
 
 ---
 
@@ -136,7 +138,8 @@ The perturbations are calibrated against the frozen T2 RL expert: 95/200 success
 - **MuJoCo Menagerie** as a git submodule pinned to a specific commit. It is not a pip package; `robot_descriptions` is an alternative that fetches it.
 - **PyTorch ≥ 2.10** with the MPS backend. LeRobot itself accepts older versions, but ≥ 2.10 pairs with a `torchcodec` that supports Homebrew's current `ffmpeg`.
 - **`lerobot`** (pinned), with its `dataset` extra. Install `ffmpeg` via Homebrew.
-- **`transformers`** (pinned) for pretrained encoders: DINOv2 and V-JEPA 2.
+- **`transformers`** (pinned) for pretrained models: SmolVLM2 and DINOv2.
+- **`diffusers`** (pinned), only to load the frozen pretrained image autoencoder used by the frame decoder.
 - **`onnx`** and **`onnxruntime`** for exported students and world models.
 - **`gymnasium`** and **`stable-baselines3`**.
 - **`pytest`**.
@@ -158,8 +161,10 @@ The perturbations are calibrated against the frozen T2 RL expert: 95/200 success
 | Physics, scripted evaluation, data generation | CPU, multiprocess | minutes to about an hour per batch |
 | State-based PPO | CPU, 8-10 processes | hours per run, capped at 2 days |
 | Frozen-backbone VLA baseline (frozen VLM, trained action head) | MPS | about 33 min to encode the limited T3-L profile once (3.8 examples/s, about 3 GB), then minutes per head run from cached features |
-| Encoder feature caching (DINOv2, V-JEPA 2) | MPS | hours per dataset version |
-| In-domain JEPA and world-model ensembles | MPS | hours per model |
+| Frozen DINOv2 features for the Phase 4 probes | MPS | minutes to tens of minutes (estimate) |
+| In-domain JEPA and world-model ensembles | MPS | about 1 h per run (measured for the JEPA: 0.54 s per step at 160 px front and 112 px wrist, 6,000 steps; about 2.5 h for the whole JEPA phase); ensemble members after the first train on cached latents |
+| Flow-matching frame decoder | MPS | about 1–2 h per world-model configuration at 160 px, plus a shorter distillation run (estimate) |
+| Scenario generation | CPU rollouts, MPS for the VLA | about 40 s per VLA episode, about 13 h for three search methods × 400 rollouts (estimate) |
 | Distillation (DAgger) | CPU rollouts, MPS training | hours per student |
 
 **36 GB:** keep only one large model in memory at a time, and never alongside a training job.
@@ -175,8 +180,8 @@ The perturbations are calibrated against the frozen T2 RL expert: 95/200 success
 - `skills/`: parameterized skills and the scripted expert
 - `data/`: demo generation and LeRobot dataset writing
 - `policies/`: PPO expert, BC baselines, frozen-backbone VLA, and distilled students
-- `encoders/`: pretrained and in-domain JEPA encoders, the feature cache, and probes
-- `world_models/`: latent dynamics, readouts, uncertainty, planners, and policy evaluation in imagination
+- `encoders/`: the in-domain JEPA, the frozen DINOv2 reference, the frame cache, and probes
+- `world_models/`: latent dynamics, readouts, uncertainty, planners, policy evaluation in imagination, the flow-matching frame decoder, and scenario generation
 - `distill/`: DAgger and teacher-student training, ONNX export, and latency benchmarks
 - `eval/`: benchmark harness, metrics, statistics, plots, and `results/` (JSON)
 - `tests/`: unit tests (scene, determinism, predicates, projection) and smoke tests for each layer
@@ -250,24 +255,29 @@ The scripted expert remains in the benchmark as a comparison baseline and as a f
 
 **Exit criteria.** The frozen-backbone baseline's T3-L results at L1 and L2 and on held-out paraphrases have confidence intervals and the wrong-object rate.
 
-### Phase 4: Representations and JEPA
+### Phase 4: In-domain JEPA
+
+One experiment; the full design is in [`jepa.md`](jepa.md).
 
 **Build.**
 
-- One encoder interface with a versioned feature cache: ImageNet ResNet-18 (the existing BC backbone), DINOv2 ViT-S/14, and V-JEPA 2 ViT-L, frozen and loaded through `transformers`.
-- An in-domain JEPA: a small ViT trained on the interaction corpus to predict the embeddings of masked regions, with collapse prevented by SIGReg (LeJEPA) or an EMA target encoder (I-JEPA), and collapse monitored through embedding spread and rank.
+- Data: the 1,046 training-seed T3-L1 episodes that already exist (the interaction corpus T3 slice and the `t3-l1` demonstrations), plus two held-out collections from the interaction collector: 100 episodes on validation seeds and 200 on evaluation seeds. Front frames at 160 px and wrist frames at 112 px, at 5 Hz, which keeps each training run to about an hour (estimate).
+- A LeWorldModel-style JEPA trained from scratch, end to end from pixels: a ViT-Tiny/16 encoder shared by both cameras, a 256-D latent, and a causal transformer predictor conditioned on the executed actions through AdaLN-zero. The loss is next-embedding MSE plus SIGReg, with no EMA target or stop-gradient; collapse is monitored through per-dimension spread and effective rank.
+- References: a random encoder of the same architecture (floor), the same architecture trained on the probe labels (ceiling), and frozen DINOv2 ViT-S/14.
 
-**Experiments.** Linear and MLP probes from each encoder to object pose, gripper width, and grasp state at L1 and L2; the same policy head trained on each encoder for T2 and T3.
+**Experiments.** Linear and MLP probes from each encoder to cube, bowl, and TCP position, cube yaw, gripper width, and held and in-bowl flags, with cube error split by resting and held; predictor rollouts of 0.2–1.0 s against persistence; optionally, one-step surprise under physically impossible and visual-only interventions.
 
-**Exit criteria.** Probe and policy tables per encoder exist, and the best encoder is selected for the world models and the students.
+**Exit criteria.** The probe table and rollout figure exist on evaluation-seed episodes; the JEPA's linear probe locates the cube better than the random encoder's; and the encoder for the T3-L1 student (JEPA or DINOv2) is chosen on validation episodes.
 
 ### Phase 5: Latent world models
 
 **Build.**
 
-- An action-conditioned transformer predictor over frozen encoder tokens from both cameras plus proprioception, at 5 Hz, trained with one-step and multi-step rollout losses (the DINO-WM recipe), on DINOv2 and V-JEPA 2 features and end to end with the in-domain JEPA (LeWorldModel-style). Train ensembles of 5.
+- An action-conditioned transformer predictor over frozen encoder tokens from both cameras plus proprioception, at 5 Hz, trained with one-step and multi-step rollout losses (the DINO-WM recipe), on frozen DINOv2 features and end to end with the Phase 4 JEPA recipe retrained on the full interaction corpus (LeWorldModel-style). Train ensembles of 5 predictors; each configuration's encoder is trained or run once and its features cached, so ensemble members after the first are cheap.
 - Readouts from latents: object poses and gripper width (so predictions are interpretable in cm) and task success.
 - Physics baselines on the same action sequences: MuJoCo with true parameters (exact, the upper bound), MuJoCo with nominal parameters under T2-H (a physics model with parameter error), and a kinematic model in which the cube moves rigidly with the gripper while grasped.
+- A generative frame decoder: latent flow matching in the space of a frozen pretrained image autoencoder, conditioned on the world-model latent, so predicted latents can be rendered as front-camera video. Its sampler is distilled from many steps to one or two.
+- Scenario generation: a parameterized scene generator restricted to the existing randomization ranges, searched with CEM for scenes that make a target policy fail, ranked by a learned failure surrogate and verified in MuJoCo.
 
 **Experiments.**
 
@@ -277,15 +287,17 @@ The scripted expert remains in the benchmark as a comparison baseline and as a f
 - A validity map: error and calibration across horizon, randomization level, dynamics shift, task phase, and training data, with a stated trusted region.
 - Planning: CEM in latent space toward a goal observation, with and without an uncertainty penalty, against the same planner using MuJoCo as the model, on T1, T2, and T2-H.
 - Policy evaluation in imagination: predicted vs real success for at least 8 policies (Pearson, Spearman, MMRV).
+- Generative decoder: physical consistency, measured by re-encoding generated frames with frozen DINOv2 and probing the cube, bowl, TCP, and gripper state against the simulator, along rollouts and against the number of sampling steps for the teacher and the distilled sampler.
+- Scenario generation: verified failures per 100 rollouts for the surrogate-guided search, unguided CEM, and uniform sampling at equal budget, with the failure reasons found. The resulting stress-test suite is frozen and reported separately from the benchmark.
 
-**Exit criteria.** The prediction, calibration, OOD, validity-map, physics-comparison, and planning results exist. No planning success threshold is set; results are reported as measured.
+**Exit criteria.** The prediction, calibration, OOD, validity-map, physics-comparison, planning, policy-evaluation, decoder, and scenario-generation results exist. No planning success threshold is set; results are reported as measured.
 
 ### Phase 6: Distillation and efficient inference
 
 **Build.**
 
-- Privileged teacher to vision student: the RL expert labels states visited by an image student (DAgger), compared with offline behavior cloning on the same number of labels.
-- ONNX export with ONNX Runtime (CPU and Core ML), `torch.compile`, and int8 quantization.
+- Privileged teacher to vision student: the RL expert labels states visited by an image student on frozen DINOv2 features (DAgger), compared with offline behavior cloning on the same number of labels. DINOv2 is used for every task, including T3-L1, because it beat the Phase 4 JEPA on the validation probes.
+- ONNX export with ONNX Runtime (CPU and Core ML), `torch.compile`, and int8 quantization, for the students, the world-model predictor, and the distilled frame-decoder sampler.
 
 **Exit criteria.** A success vs latency vs parameter-count Pareto table covering the RL expert, the students, and their exported variants.
 
@@ -293,7 +305,7 @@ The scripted expert remains in the benchmark as a comparison baseline and as a f
 
 - Freeze the benchmark: final seeds, final configs, and one command that regenerates every table and figure.
 - Run the final evaluations with Wilson (success rates) or bootstrap (across seeds) 95% confidence intervals.
-- Demo video, about 2 minutes: the world model's imagined rollout next to the real execution, a CEM-planned episode, and the results tables.
+- Demo video, about 2 minutes: the world model's imagined rollout, decoded to frames, next to the real execution, a CEM-planned episode, a generated failure scenario, and the results tables.
 - README: architecture diagram, results, how to reproduce, limitations.
 - Write-up: what was built, the key findings (including where learned models beat physics-based models and where they do not), and directions for future work.
 - Repo hygiene: CI green, pinned requirements and lockfile, license, documented seeds.
@@ -315,7 +327,7 @@ The scripted expert remains in the benchmark as a comparison baseline and as a f
   - Policies: parameter count and p50/p95 latency at batch size 1, with backend and precision.
   - World models: prediction error vs horizon (cm, decoded state), interval coverage and Gaussian NLL, expected calibration error, OOD AUROC, and Pearson, Spearman, and MMRV for policy evaluation.
 - **Main benchmark table.**
-  - Rows: scripted expert, RL expert, state and image BC baselines (scripted-expert demonstrations at 128 px), the frozen-backbone VLA, the best encoder policy, distilled students, and world-model MPC.
+  - Rows: scripted expert, RL expert, state and image BC baselines (scripted-expert demonstrations at 128 px), the frozen-backbone VLA, distilled students, and world-model MPC.
   - **Shared columns:** T2-L1 and T2-H.
   - Extra columns: T3-L1, T4-L1, and T2-L2 for the methods whose observations support them, and T3-L for the frozen-backbone VLA. Mark unsupported cells N/A explicitly.
   - Further columns: observation modality, parameters, latency, training data (demos or environment steps), and training compute (CPU or MPS hours).
@@ -340,9 +352,12 @@ The scripted expert remains in the benchmark as a comparison baseline and as a f
 | Grasping is unreliable (slip, penetration, spinning) | High | Elliptic cones with `impratio`, `condim`, and `solref` tuning; lift check and regrasp; larger or lighter cubes; simpler object geometry |
 | Frame or convention bugs | High | Unit tests, projection round-trip tests, `conventions.md` |
 | World-model planning fails on contact-rich pick-and-place | High | Intermediate goal frames, shorter horizons, uncertainty penalties; report T1 and partial-progress results as measured |
-| Pretrained encoders slow on MPS | Medium | Cache features once per dataset version; subsample frames; use DINOv2 ViT-S for world-model training |
-| JEPA representation collapse | Medium | Monitor embedding spread and rank; SIGReg weight; EMA target encoder |
+| In-domain JEPA training slow or memory-bound on MPS | Medium | Smaller batch, activation checkpointing, shorter step budget, or the front camera only; record the change in `run.json` |
+| JEPA representation collapse | Medium | Monitor per-dimension spread and effective rank; raise the SIGReg weight; EMA target encoder as a last resort |
+| JEPA encodes the arm but not the cube ("static collapse") | Medium | Report cube error separately for resting and held cubes; more object-interaction data; predict further ahead |
 | Imagined rollouts drift over long horizons | Medium | Multi-step rollout losses; report the horizon where predictions stop being trustworthy |
+| Frame decoder too slow on MPS, or its frames look plausible but misplace the cube | Medium | Smaller decoder or 112 px pixel-space decoding; report physical consistency against the autoencoder floor as measured |
+| Scenario surrogate no better than chance | Medium | Report it; fall back to CEM verified directly in MuJoCo with a halved budget |
 | LeRobot API or dataset-format churn | Medium | Pin the version |
 | Dependency conflicts (LeRobot, `transformers`) | Medium | Pinned versions and a lockfile |
 | Phase 1b RL expert does not beat the scripted expert on some task | Medium | Keep the scripted expert as that task's demo source; proceed with the remaining tasks. If pure PPO falls well short, the next options are SAC/TQC with HER or BC-initialized PPO, which need a roadmap decision. |
@@ -353,14 +368,13 @@ The scripted expert remains in the benchmark as a comparison baseline and as a f
 
 ## 12. Core and optional components
 
-**Core:** scene and determinism tests, the evaluation harness, the scripted expert, the RL expert, the datasets and training infrastructure, the frozen-backbone VLA baseline, encoder probes, the latent world-model ensemble with physics baselines, uncertainty and OOD evaluation, the validity map, CEM planning on T1 and T2, one distilled student with measured latency, and the write-up.
+**Core:** scene and determinism tests, the evaluation harness, the scripted expert, the RL expert, the datasets and training infrastructure, the frozen-backbone VLA baseline, the in-domain JEPA probe study, the latent world-model ensemble with physics baselines, uncertainty and OOD evaluation, the validity map, CEM planning on T1 and T2, policy evaluation in imagination, the generative frame decoder with its distilled sampler, scenario generation with the classifier surrogate, one distilled student with measured latency, and the write-up.
 
 **Optional, in decreasing priority:**
 
-1. Policy evaluation in imagination
-2. The in-domain JEPA (the pretrained encoders remain)
-3. A pixel decoder for visualizing imagined rollouts
-4. T4 stacking for learned methods (it remains for the scripted and RL experts)
+1. The imagined-rollout surrogate for scenario generation
+2. The JEPA surprise test
+3. T4 stacking for learned methods (it remains for the scripted and RL experts)
 
 ---
 
@@ -368,7 +382,10 @@ The scripted expert remains in the benchmark as a comparison baseline and as a f
 
 - **Larger VLAs.** Fine-tune π0.5 or GR00T N1.7 on a rented GPU and compare them with the frozen-backbone VLA.
 - **Multi-GPU training.** Run the world-model and JEPA training on a multi-GPU node with the existing DDP code and report scaling efficiency.
+- **Generative video world model.** One autoregressive, action-conditioned latent flow-matching model over frame sequences, replacing the JEPA predictor and frame decoder pair, trained on a rented GPU.
+- **Distributed data and evaluation.** Data collection, evaluation, and scenario search across machines with Ray.
 - **Deployment.** TensorRT engines for the students and the world-model predictor on an NVIDIA GPU or Jetson.
+- **Broader representation study.** Pretrained encoders (V-JEPA 2 or 2.1, ResNet-18, DINOv3) probed alongside the in-domain JEPA, an L2 test set, and closed-loop policies on each frozen encoder.
 - **Pretrained world models.** V-JEPA 2-AC zero-shot planning and a generative video world model (for example, NVIDIA Cosmos) as policy evaluators, compared with the in-repo models.
 - **Standard benchmarks.** LIBERO, for comparability with published results.
 - **Isaac Lab port.** GPU-parallel RL and data generation.
@@ -391,6 +408,13 @@ The scripted expert remains in the benchmark as a comparison baseline and as a f
   - SIMPLER (policy-evaluation correlation and MMRV): Li et al., 2024 (arXiv:2405.05941)
   - WorldGym (world models as policy evaluators): 2025 (arXiv:2506.00613)
   - DAgger: Ross et al., 2011
+  - Flow matching: Lipman et al., 2023 (arXiv:2210.02747)
+  - Rectified flow: Liu et al., 2023 (arXiv:2209.03003)
+  - Latent diffusion: Rombach et al., 2022 (arXiv:2112.10752)
+  - Scalable diffusion models with transformers (DiT): Peebles and Xie, 2023 (arXiv:2212.09748)
+  - Knowledge distillation of iterative samplers: Luhman and Luhman, 2021 (arXiv:2101.02388)
+  - Progressive distillation: Salimans and Ho, 2022 (arXiv:2202.00512)
+  - Black-box safety validation (survey): Corso et al., 2021, "A Survey of Algorithms for Black-Box Safety Validation of Cyber-Physical Systems"
   - Learning by Cheating (privileged teacher, vision student): Chen et al., 2019
   - DART: Laskey et al., 2017
   - ACT: Zhao et al., 2023; Diffusion Policy: Chi et al., 2023 (action-space rationale, §3.4)

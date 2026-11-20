@@ -224,6 +224,7 @@ __marimo__/
 
 # Project data and generated artifacts
 data/datasets/
+data/cache/
 checkpoints/
 outputs/
 videos/

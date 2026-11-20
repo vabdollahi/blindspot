@@ -2,10 +2,14 @@ from collections.abc import Sequence
 
 import numpy as np
 
-# Roadmap §3 seed ranges: train 0-99,999, validation 100,000-109,999.
+# Roadmap §3 seed ranges: train 0-99,999, validation 100,000-109,999,
+# evaluation 1,000,000-1,009,999.
 TRAIN_SEED_START = 0
 TRAIN_SEED_STOP = 100_000
 VALIDATION_SEED_START = 100_000
+VALIDATION_SEED_STOP = 110_000
+EVALUATION_SEED_START = 1_000_000
+EVALUATION_SEED_STOP = 1_010_000
 
 
 def named_generators(seed: int, names: Sequence[str]) -> dict[str, np.random.Generator]:

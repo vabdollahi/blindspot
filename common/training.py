@@ -595,10 +595,9 @@ def optimizer_step(
     ]
     if not parameters:
         raise RuntimeError(f"No gradients were produced at step {step}")
-    for parameter in parameters:
-        if not torch.isfinite(parameter.grad).all().item():
-            optimizer.zero_grad(set_to_none=True)
-            raise FloatingPointError(f"Non-finite gradient detected at step {step}")
+    if not _all_finite([parameter.grad for parameter in parameters]):
+        optimizer.zero_grad(set_to_none=True)
+        raise FloatingPointError(f"Non-finite gradient detected at step {step}")
     norm = torch.nn.utils.clip_grad_norm_(
         parameters,
         max_grad_norm,
@@ -612,12 +611,17 @@ def optimizer_step(
         scaler.update()
     if scheduler is not None:
         scheduler.step()
-    for parameter in model.parameters():
-        if not torch.isfinite(parameter).all().item():
-            raise FloatingPointError(
-                f"Non-finite model parameter detected at step {step}"
-            )
+    if not _all_finite(list(model.parameters())):
+        raise FloatingPointError(f"Non-finite model parameter detected at step {step}")
     return gradient_norm
+
+
+def _all_finite(tensors: Sequence[Tensor]) -> bool:
+    """Return whether every tensor is finite, with one device synchronization."""
+    if not tensors:
+        return True
+    flags = torch.stack([torch.isfinite(tensor).all() for tensor in tensors])
+    return bool(flags.all().item())
 
 
 def save_training_checkpoint(

@@ -20,7 +20,15 @@ from typing import Any, Literal
 import numpy as np
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from common.seeding import TRAIN_SEED_START, TRAIN_SEED_STOP, named_generators
+from common.seeding import (
+    EVALUATION_SEED_START,
+    EVALUATION_SEED_STOP,
+    TRAIN_SEED_START,
+    TRAIN_SEED_STOP,
+    VALIDATION_SEED_START,
+    VALIDATION_SEED_STOP,
+    named_generators,
+)
 from data.generate import (
     DATASET_FPS,
     DATASET_IMAGE_SIZE,
@@ -41,6 +49,12 @@ from eval.policy import Policy
 from motion.control import WORKSPACE_LOWER, WORKSPACE_UPPER, tcp_pose
 
 TASKS = ("T1", "T2", "T3")
+SeedSplit = Literal["train", "validation", "evaluation"]
+SEED_RANGES: dict[str, tuple[int, int]] = {
+    "train": (TRAIN_SEED_START, TRAIN_SEED_STOP),
+    "validation": (VALIDATION_SEED_START, VALIDATION_SEED_STOP),
+    "evaluation": (EVALUATION_SEED_START, EVALUATION_SEED_STOP),
+}
 REQUESTED_SOURCES = (
     "rl-expert",
     "rl-expert-noisy",
@@ -76,19 +90,37 @@ class InteractionConfig(BaseModel):
         default_factory=lambda: min(8, os.cpu_count() or 1),
         ge=1,
     )
-    seed_start: int = Field(default=TRAIN_SEED_START, ge=TRAIN_SEED_START)
+    tasks: tuple[Literal["T1", "T2", "T3"], ...] = TASKS
+    seed_split: SeedSplit = "train"
+    seed_start: int = Field(ge=0)
     large_noise_position_std: float = Field(default=0.05, gt=0.0, allow_inf_nan=False)
     large_noise_yaw_degrees: float = Field(default=15.0, gt=0.0, allow_inf_nan=False)
     reachable_target_count: int = Field(default=24, ge=4)
     max_attempts_per_target: int = Field(default=50, ge=1)
 
+    @model_validator(mode="before")
+    @classmethod
+    def default_seed_start(cls, data: Any) -> Any:
+        """Start at the first seed of the requested split unless one is given."""
+        if isinstance(data, Mapping) and data.get("seed_start") is None:
+            split = data.get("seed_split", "train")
+            if split in SEED_RANGES:
+                return {**data, "seed_start": SEED_RANGES[split][0]}
+        return data
+
     @model_validator(mode="after")
-    def validate_training_seed_range(self) -> InteractionConfig:
-        """Keep every corpus episode in the reserved training-seed range."""
-        if self.seed_start + self.episodes > TRAIN_SEED_STOP:
+    def validate_seed_range_and_tasks(self) -> InteractionConfig:
+        """Keep every episode inside one reserved seed range, with known tasks."""
+        start, stop = SEED_RANGES[self.seed_split]
+        if self.seed_start < start or self.seed_start + self.episodes > stop:
             raise ValueError(
-                "Interaction corpus seeds must remain below the validation range"
+                f"Interaction seeds {self.seed_start}-"
+                f"{self.seed_start + self.episodes - 1} must lie in the "
+                f"{self.seed_split} range [{start}, {stop})"
             )
+        if not self.tasks or len(set(self.tasks)) != len(self.tasks):
+            raise ValueError("tasks must be a non-empty list of distinct tasks")
+        self.tasks = tuple(task for task in TASKS if task in self.tasks)
         return self
 
 
@@ -107,7 +139,7 @@ class InteractionEpisodeRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     order_index: int = Field(ge=0)
-    seed: int = Field(ge=TRAIN_SEED_START, lt=TRAIN_SEED_STOP)
+    seed: int = Field(ge=0)
     task: Literal["T1", "T2", "T3"]
     requested_source: Literal[
         "rl-expert",
@@ -163,6 +195,8 @@ class InteractionCorpusSummary(BaseModel):
     level: str = "L1"
     fps: int = DATASET_FPS
     image_size: int = DATASET_IMAGE_SIZE
+    tasks: list[str] = list(TASKS)
+    seed_split: SeedSplit = "train"
     total_episodes: int
     source_ids: dict[str, int]
     requested_source_counts: dict[str, int]
@@ -216,6 +250,14 @@ class RandomReachablePolicy:
         return self._action.copy()
 
 
+def default_dataset_name(config: InteractionConfig) -> str:
+    """Name the full training corpus interaction-l1, and subsets by task and split."""
+    if config.tasks == TASKS and config.seed_split == "train":
+        return "interaction-l1"
+    task_part = "-".join(task.lower() for task in config.tasks)
+    return f"interaction-{task_part}-l1-{config.seed_split}"
+
+
 def interaction_dataset_features() -> dict[str, dict[str, Any]]:
     """Return the demonstration schema plus corpus provenance and next success."""
     features = dataset_features()
@@ -258,12 +300,13 @@ def _discover_intermediate_checkpoints(task: str) -> list[Path]:
 
 
 def _load_checkpoint_catalog(
+    tasks: tuple[str, ...] = TASKS,
 ) -> tuple[dict[str, Path], dict[str, list[Path]], dict[Path, str]]:
-    """Resolve frozen and intermediate policy checkpoints for T1-T3."""
+    """Resolve frozen and intermediate policy checkpoints for the given tasks."""
     experts: dict[str, Path] = {}
     intermediate: dict[str, list[Path]] = {}
     digests: dict[Path, str] = {}
-    for task in TASKS:
+    for task in tasks:
         expert = (
             _PROJECT_ROOT
             / "checkpoints"
@@ -288,11 +331,12 @@ def build_episode_requests(
     intermediate: dict[str, list[Path]],
     checkpoint_digests: dict[Path, str],
 ) -> list[InteractionEpisodeRequest]:
-    """Build a balanced task/source schedule on disjoint training seeds."""
+    """Build a balanced task/source schedule on the configured seed range."""
+    tasks = config.tasks
     requests: list[InteractionEpisodeRequest] = []
     for order_index in range(config.episodes):
-        task = TASKS[order_index % len(TASKS)]
-        source_index = (order_index // len(TASKS)) % len(REQUESTED_SOURCES)
+        task = tasks[order_index % len(tasks)]
+        source_index = (order_index // len(tasks)) % len(REQUESTED_SOURCES)
         source = REQUESTED_SOURCES[source_index]
         checkpoint_dir: Path | None = None
         checkpoint_sha256: str | None = None
@@ -302,7 +346,7 @@ def build_episode_requests(
         elif source == "intermediate-ppo":
             task_checkpoints = intermediate[task]
             checkpoint_dir = task_checkpoints[
-                (order_index // (len(TASKS) * len(REQUESTED_SOURCES)))
+                (order_index // (len(tasks) * len(REQUESTED_SOURCES)))
                 % len(task_checkpoints)
             ]
             checkpoint_sha256 = checkpoint_digests[checkpoint_dir]
@@ -801,7 +845,7 @@ def generate_interaction_corpus(
     dataset_name: str | None = None,
 ) -> InteractionCorpusSummary:
     """Collect and verify the mixed-source L1 interaction corpus."""
-    experts, intermediate, checkpoint_digests = _load_checkpoint_catalog()
+    experts, intermediate, checkpoint_digests = _load_checkpoint_catalog(config.tasks)
     requests = build_episode_requests(
         config,
         experts,
@@ -812,7 +856,7 @@ def generate_interaction_corpus(
         request.requested_source for request in requests
     )
     checkpoint_records: list[CheckpointRecord] = []
-    for task in TASKS:
+    for task in config.tasks:
         checkpoint_groups: tuple[
             tuple[Literal["rl-expert", "intermediate-ppo"], list[Path]], ...
         ] = (
@@ -829,7 +873,7 @@ def generate_interaction_corpus(
                         sha256=checkpoint_digests[checkpoint_dir],
                     )
                 )
-    requested_name = dataset_name or "interaction-l1"
+    requested_name = dataset_name or default_dataset_name(config)
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", requested_name):
         raise ValueError(
             "dataset_name must contain lowercase letters, digits, or hyphens"
@@ -858,7 +902,7 @@ def generate_interaction_corpus(
     failure_breakdown: Counter[str] = Counter()
     task_requests = {
         task: [request for request in requests if request.task == task]
-        for task in TASKS
+        for task in config.tasks
     }
 
     try:
@@ -873,7 +917,7 @@ def generate_interaction_corpus(
             encoder_threads=1,
         )
         context = multiprocessing.get_context("spawn")
-        for task in TASKS:
+        for task in config.tasks:
             requests_for_task = task_requests[task]
             with ProcessPoolExecutor(
                 max_workers=config.workers,
@@ -916,6 +960,8 @@ def generate_interaction_corpus(
 
         summary = InteractionCorpusSummary(
             dataset=normalized_name,
+            tasks=list(config.tasks),
+            seed_split=config.seed_split,
             total_episodes=len(episode_records),
             source_ids=SOURCE_IDS,
             requested_source_counts=dict(sorted(requested_source_counts.items())),
@@ -967,7 +1013,24 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=min(8, os.cpu_count() or 1),
     )
-    parser.add_argument("--seed-start", type=int, default=TRAIN_SEED_START)
+    parser.add_argument(
+        "--tasks",
+        nargs="+",
+        choices=TASKS,
+        default=list(TASKS),
+        help="Collect only these tasks (default: T1 T2 T3).",
+    )
+    parser.add_argument(
+        "--seed-split",
+        choices=tuple(SEED_RANGES),
+        default="train",
+        help="Seed range for every episode; held-out sets use validation or evaluation.",
+    )
+    parser.add_argument(
+        "--seed-start",
+        type=int,
+        help="First seed (default: the start of --seed-split's range).",
+    )
     parser.add_argument("--large-noise-position-std", type=float, default=0.05)
     parser.add_argument("--large-noise-yaw-degrees", type=float, default=15.0)
     parser.add_argument("--reachable-target-count", type=int, default=24)
@@ -1010,6 +1073,8 @@ def main() -> None:
     config = InteractionConfig(
         episodes=arguments.episodes,
         workers=arguments.workers,
+        tasks=tuple(arguments.tasks),
+        seed_split=arguments.seed_split,
         seed_start=arguments.seed_start,
         large_noise_position_std=arguments.large_noise_position_std,
         large_noise_yaw_degrees=arguments.large_noise_yaw_degrees,

@@ -10,6 +10,7 @@ import mujoco
 import numpy as np
 import yaml
 from gymnasium import spaces
+from numpy.typing import ArrayLike
 from pydantic import BaseModel, ConfigDict, Field
 from scipy.spatial.transform import Rotation
 
@@ -49,7 +50,25 @@ STAGING_POSITIONS = (
     np.array([0.80, 0.45, 0.02], dtype=np.float64),
     np.array([0.25, 0.49, 0.02], dtype=np.float64),
 )
+# T3 success region, relative to the bowl body origin: inside the inner radius,
+# above the floor, and below the rim.
+BOWL_INNER_RADIUS = 0.07
+BOWL_FLOOR_OFFSET = 0.006
+BOWL_RIM_OFFSET = 0.056
 _CONFIG_DIR = Path(__file__).resolve().parent / "configs"
+
+
+def cube_within_bowl(cube_position: ArrayLike, bowl_position: ArrayLike) -> bool:
+    """Return whether a cube center lies in the bowl's radius and height band."""
+    cube = np.asarray(cube_position, dtype=np.float64)
+    bowl = np.asarray(bowl_position, dtype=np.float64)
+    radial_distance = np.linalg.norm(cube[:2] - bowl[:2])
+    return bool(
+        radial_distance < BOWL_INNER_RADIUS
+        and bowl[2] + BOWL_FLOOR_OFFSET <= cube[2] < bowl[2] + BOWL_RIM_OFFSET
+    )
+
+
 _TEXT_CHARSET = string.ascii_letters + string.digits + "_ -.,{}'!"
 
 
@@ -1204,11 +1223,8 @@ class PickPlaceEnv(gym.Env[dict[str, Any], np.ndarray]):
         """Check bowl radius, floor/rim height, and the cube's rest condition."""
         cube_position = self.data.xpos[self.model.body(name).id]
         bowl_position = self.data.xpos[self.model.body("bowl").id]
-        radial_distance = np.linalg.norm(cube_position[:2] - bowl_position[:2])
-        return bool(
-            radial_distance < 0.07
-            and bowl_position[2] + 0.006 <= cube_position[2] < bowl_position[2] + 0.056
-            and self._body_is_at_rest(name)
+        return cube_within_bowl(cube_position, bowl_position) and self._body_is_at_rest(
+            name
         )
 
     def _cube_stacked_on_blue(self) -> bool:

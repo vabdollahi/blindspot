@@ -1,6 +1,18 @@
 # Blindspot
 
-A simulated Franka Panda environment for evaluating robot foundation models. A MuJoCo scene, scripted and reinforcement-learning experts, and versioned demonstrations support a frozen-backbone VLA baseline, JEPA representations, calibrated latent world models, and distilled policies. Methods are compared on shared tasks and seeds. See [the project overview](docs/idea.md) and [the roadmap](docs/roadmap.md).
+A simulated Franka Panda environment for evaluating robot foundation models. A MuJoCo scene, scripted and reinforcement-learning experts, and versioned demonstrations support a frozen-backbone VLA baseline, JEPA representations, calibrated latent world models with a generative frame decoder and scenario generation for stress testing, and distilled policies. Methods are compared on shared tasks and seeds, and every model is sized to train on a single laptop (Apple M3 Max). See [the project overview](docs/idea.md) and [the roadmap](docs/roadmap.md).
+
+## Status
+
+| Phase | Scope | Status |
+| --- | --- | --- |
+| 0–1 | MuJoCo scene, Gymnasium environment, scripted expert, evaluation harness | Implemented |
+| 1b | Pure-PPO experts trained from scratch on privileged state | Implemented |
+| 2 | Demonstration datasets, world-model interaction corpus, T2-H, shared training infrastructure | Implemented |
+| 3 | Frozen-backbone VLA (SmolVLM2-500M plus a chunked action head) | Baseline implemented ([design](docs/vla-baseline.md)); benchmark evaluation pending |
+| 4 | In-domain JEPA on T3-L1, probed against frozen DINOv2 | Complete ([design](docs/jepa.md), [results](docs/decisions.md#in-domain-jepa-phase-4)) |
+| 5 | Latent world models: uncertainty, physics baselines, planning, policy evaluation, flow-matching frame decoder, scenario generation | Planned |
+| 6–7 | Distillation and efficient inference; benchmark and release | Planned |
 
 ## Setup
 
@@ -53,6 +65,65 @@ rationale and ablations are in
 ![Frozen-backbone VLA placing the named red cube in the bowl beside a blue cube (T3-L1, evaluation seed 1,000,011)](docs/media/t3l-l1-vla-chunk.gif)
 
 *Frozen-backbone VLA with 10-step action chunks (limited red/blue profile) on evaluation seed 1,000,011, with the instruction "Place the red cube inside the bowl." and a blue cube on the table. From the camera images, instruction, and robot state alone (no object poses), the policy picks the named cube, carries it to the bowl, and releases it, leaving the blue cube untouched. This is a successful episode from the limited-scope diagnostic evaluation; grasp completion remains the main failure mode (see [Limitations](docs/vla-baseline.md#limitations)).*
+
+## In-domain JEPA (Phase 4)
+
+A LeWorldModel-style JEPA trained from scratch on T3-L1 video and executed
+actions: a ViT-Tiny/16 shared by the front (160 px) and wrist (112 px)
+cameras, a 256-D latent, and a causal predictor conditioned on 0.2 s action
+blocks through AdaLN-zero, trained with next-embedding MSE plus SIGReg (no EMA
+target or stop-gradient). It is probed for cube, bowl, TCP, and gripper state
+against a random encoder, a supervised encoder of the same architecture, and
+frozen DINOv2 ViT-S/14. The design, hypotheses, and measurements are in
+[docs/jepa.md](docs/jepa.md).
+
+Install the extra, then collect the two held-out sets (100 validation-seed and
+200 evaluation-seed T3 episodes, about 11 min) and decode every dataset once
+into the 5 Hz frame cache under `data/cache/frames/` (about 2 min, 7.6 GB):
+
+```sh
+uv sync --locked --extra jepa
+make jepa-data
+```
+
+Each training run takes about 55 min on an M3 Max (6,000 steps at 0.54 s per
+step in fp32). To choose λ, start a seed-0 run for each value and stop it
+after 1,000 steps (about 10 min each):
+
+```sh
+for lambda in 0.05 0.1 0.2; do make train-jepa JEPA_ARGS="--sigreg-weight $lambda --stop-after-steps 1000"; done
+```
+
+Compare the validation probe score (`result.history[-1].probe_score` in each
+`run.json`, or `validation/probe_score` in TensorBoard; lower is better). Then
+resume the winner to 6,000 steps as the final JEPA run (one seed, to fit the
+compute budget) and train the supervised ceiling (λ = 0.05 was selected):
+
+```sh
+make train-jepa JEPA_ARGS="--resume checkpoints/jepa/t3-l1/lambda-0.05-seed-0"
+make train-jepa JEPA_ARGS="--mode supervised"
+```
+
+Runs are written to `checkpoints/jepa/t3-l1/` with `run.json`, TensorBoard
+scalars (prediction loss, SIGReg, latent effective rank, prediction loss
+relative to persistence, AdaLN gate size, and the validation probe score),
+and a resumable `checkpoint.pt`. To split a run into shorter sessions, add
+`--stop-after-steps N`, then continue with `--resume checkpoints/jepa/t3-l1/<run>`;
+the resumed run is identical to an uninterrupted one.
+
+Probe every encoder on the evaluation-seed episodes, roll out each JEPA's
+predictor, and render the tables and figures:
+
+```sh
+make evaluate-jepa JEPA_EVAL_ARGS="--jepa-runs checkpoints/jepa/t3-l1/lambda-0.05-seed-0 --supervised-run checkpoints/jepa/t3-l1/supervised-seed-0"
+make report
+```
+
+This writes `eval/results/jepa/T3-L1-probes.json` and `T3-L1-rollout.json`;
+`make report` adds the probe table, probe-error chart, rollout error against
+horizon, and training diagnostics to `eval/results/report.md`. DINOv2 weights
+(`facebook/dinov2-small`, Apache-2.0) are downloaded on first use and the
+resolved revision is recorded in the results.
 
 ## Evaluation
 
@@ -245,6 +316,6 @@ Close the viewer after the episode result is printed. Use `--device cpu` to redu
 | Project code | MIT; see [LICENSE](LICENSE). |
 | MuJoCo Menagerie | Per-directory terms are retained in the [Menagerie license file](third_party/mujoco_menagerie/LICENSE); check the license for each model used. |
 | Franka Emika Panda model | Apache-2.0; see the upstream [Panda license](third_party/mujoco_menagerie/franka_emika_panda/LICENSE). |
-| Model weights | No model weights are bundled in this phase. Record each checkpoint's license and use terms before adding or downloading it. |
+| Model weights | No model weights are bundled. Downloaded at run time: [SmolVLM2-500M-Video-Instruct](https://huggingface.co/HuggingFaceTB/SmolVLM2-500M-Video-Instruct) (Apache-2.0) for Phase 3 and [DINOv2 ViT-S/14](https://huggingface.co/facebook/dinov2-small) (Apache-2.0) for Phase 4. |
 
 The [MuJoCo Menagerie submodule](third_party/mujoco_menagerie) is pinned by Git to a specific commit. Dependencies retain their respective upstream licenses. No third-party model weights are redistributed by this repository at this stage.
