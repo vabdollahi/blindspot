@@ -313,7 +313,6 @@ Close the viewer after the episode result is printed. Use `--device cpu` to redu
 
 | Component | License information |
 | --- | --- |
-| Project code | MIT; see [LICENSE](LICENSE). |
 | MuJoCo Menagerie | Per-directory terms are retained in the [Menagerie license file](third_party/mujoco_menagerie/LICENSE); check the license for each model used. |
 | Franka Emika Panda model | Apache-2.0; see the upstream [Panda license](third_party/mujoco_menagerie/franka_emika_panda/LICENSE). |
 | Model weights | No model weights are bundled. Downloaded at run time: [SmolVLM2-500M-Video-Instruct](https://huggingface.co/HuggingFaceTB/SmolVLM2-500M-Video-Instruct) (Apache-2.0) for Phase 3 and [DINOv2 ViT-S/14](https://huggingface.co/facebook/dinov2-small) (Apache-2.0) for Phase 4. |
